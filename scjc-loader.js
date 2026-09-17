@@ -16,7 +16,34 @@ function materialize() {
   const newRetry = "const staleBackupToken = r.status === 404 && state.scTokenSource === 'backup';\n  if ((r.status === 401 || r.status === 403 || staleBackupToken) && !retried) {\n    state = await refreshScToken(config, state);";
   if (!source.includes(oldRetry)) throw new Error('SCJC stale-token patch target is missing');
   source = source.replace(oldRetry, newRetry);
-  source = source.replace("const VERSION = '1.2.1';", "const VERSION = '1.2.2';");
+
+  const oldTail = `  if (!r.ok) throw new ApiError(\`SC HTTP \${r.status} for \${String(path).slice(0, 120)}\`, { service: 'Stream Cinema', status: r.status, body: r.body });`;
+  const newTail = `  if (r.status === 404 && state.scTokenSource === 'auth') {
+    for (const delayMs of [750, 2000, 5000]) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      r = await guardedJson(state, 'Stream Cinema', buildScUrl(path, state), {
+        headers: { ...apiHeaders(state, false), 'X-AUTH-TOKEN': state.scToken }
+      });
+      if (r.status !== 404) break;
+    }
+  }
+  if (!r.ok) {
+    if (r.status === 404) {
+      try {
+        const sub = await checkSubscription(config, state, true);
+        console.warn('[SC404_DIAG]', JSON.stringify({ tokenSource: state.scTokenSource, tokenLength: String(state.scToken || '').length, subscriptionActive: sub.active, daysLeft: sub.daysLeft }));
+        if (!sub.active) throw new ApiError('KRA subscription is inactive', { service: 'KRA', status: 403 });
+      } catch (diagErr) {
+        if (diagErr instanceof ApiError && diagErr.status === 403) throw diagErr;
+        console.warn('[SC404_DIAG]', JSON.stringify({ tokenSource: state.scTokenSource, tokenLength: String(state.scToken || '').length, subscriptionCheck: 'failed' }));
+      }
+      throw new ApiError('Stream Cinema token is not accepted yet (HTTP 404 after fresh token)', { service: 'Stream Cinema', status: 502, body: r.body });
+    }
+    throw new ApiError(\`SC HTTP \${r.status} for \${String(path).slice(0, 120)}\`, { service: 'Stream Cinema', status: r.status, body: r.body });
+  }`;
+  if (!source.includes(oldTail)) throw new Error('SCJC delayed-retry patch target is missing');
+  source = source.replace(oldTail, newTail);
+  source = source.replace("const VERSION = '1.2.1';", "const VERSION = '1.2.3';");
 
   const target = path.join(__dirname, '.scjc-runtime.js');
   fs.writeFileSync(target, source);
