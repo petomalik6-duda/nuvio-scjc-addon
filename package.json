@@ -1,12 +1,12 @@
 {
   "name": "nuvio-scjc-addon",
-  "version": "1.2.1",
+  "version": "1.2.4",
   "private": true,
   "description": "Nuvio/Stremio bridge for an authenticated KRA / Stream Cinema account, reconstructed from the supplied Android APK.",
-  "main": "scjc-loader.js",
+  "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node scjc-loader.js"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=20"
