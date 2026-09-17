@@ -16,6 +16,33 @@ function synthetic(status, message) {
   });
 }
 
+function safePath(raw) {
+  return String(raw || '').replace(/\/(?:eyJ|[A-Za-z0-9_-]{80,})[^/]*(?=\/|$)/g, '/[config]');
+}
+
+// Safe 5xx diagnostics without exposing the encrypted config token.
+try {
+  const http = require('node:http');
+  const originalCreateServer = http.createServer;
+  http.createServer = function(...args) {
+    const idx = args.findIndex((v) => typeof v === 'function');
+    if (idx >= 0) {
+      const listener = args[idx];
+      args[idx] = function(req, res) {
+        const originalWriteHead = res.writeHead;
+        res.writeHead = function(statusCode, ...rest) {
+          if (Number(statusCode) >= 500) {
+            console.error('[HTTP_5XX]', JSON.stringify({ status: Number(statusCode), url: safePath(req?.url) }));
+          }
+          return originalWriteHead.call(this, statusCode, ...rest);
+        };
+        return listener(req, res);
+      };
+    }
+    return originalCreateServer.apply(this, args);
+  };
+} catch {}
+
 if (realFetch) {
   global.fetch = async function safeFetch(input, init) {
     let url;
@@ -31,19 +58,20 @@ if (realFetch) {
     // a manually supplied 32-character token must be used instead.
     if (url.pathname === '/kodi/auth/token') {
       console.warn('[SC_SAFETY] blocked automatic auth/token request');
-      return synthetic(403, 'Automatic Stream Cinema token creation is disabled');
+      // 404 is handled by server.js as a controlled SC auth failure.
+      return synthetic(404, 'Automatic Stream Cinema token creation is disabled');
     }
 
     const now = Date.now();
     if (blockedUntil > now) {
-      return synthetic(503, 'Stream Cinema circuit breaker is open after token rejection');
+      return synthetic(404, 'Stream Cinema circuit breaker is open after token rejection');
     }
 
     if (validatedUntil > now) return realFetch(input, init);
 
     if (validationPromise) {
       const ok = await validationPromise;
-      if (!ok) return synthetic(503, 'Stream Cinema circuit breaker is open after token rejection');
+      if (!ok) return synthetic(404, 'Stream Cinema circuit breaker is open after token rejection');
       return realFetch(input, init);
     }
 
