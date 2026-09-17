@@ -16,11 +16,10 @@ function materialize() {
   return target;
 }
 
-function makeWrapper(runtime) {
-  const wrapper = path.join(__dirname, '.scjc-wrapper.js');
-  const src = `
+function makePreload() {
+  const preload = path.join(__dirname, '.scjc-diagnostics.js');
+  const src = String.raw`
 'use strict';
-const runtime = ${JSON.stringify(runtime)};
 const realFetch = global.fetch;
 function safeUrl(input) {
   try {
@@ -63,15 +62,27 @@ if (realFetch) {
     }
   };
 }
-require(runtime);
+try {
+  const http = require('node:http');
+  const originalCreateServer = http.createServer;
+  http.createServer = function(...args) {
+    const server = originalCreateServer.apply(this, args);
+    server.prependListener('request', (req) => {
+      const u = String(req.url || '').replace(/\/(?:eyJ|[A-Za-z0-9_-]{80,})[^/]*(?=\/|$)/g, '/[config]');
+      console.log('[REQUEST]', JSON.stringify({method:req.method,url:u}));
+    });
+    return server;
+  };
+} catch {}
 `;
-  fs.writeFileSync(wrapper, src);
-  return wrapper;
+  fs.writeFileSync(preload, src);
+  return preload;
 }
 
 if (require.main === module) {
   const runtime = materialize();
-  const child = spawn(process.execPath, [makeWrapper(runtime)], { stdio: 'inherit', env: process.env });
+  const preload = makePreload();
+  const child = spawn(process.execPath, ['-r', preload, runtime], { stdio: 'inherit', env: process.env });
   for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => child.kill(sig));
   child.on('exit', (code, signal) => {
     if (signal) process.kill(process.pid, signal);
