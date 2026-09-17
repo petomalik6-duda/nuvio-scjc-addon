@@ -10,9 +10,16 @@ function materialize() {
     .sort();
   if (!parts.length) throw new Error('SCJC runtime payload is missing');
   const b64 = parts.map((name) => fs.readFileSync(path.join(__dirname, name), 'utf8').trim()).join('');
-  const code = zlib.gunzipSync(Buffer.from(b64, 'base64'));
+  let source = zlib.gunzipSync(Buffer.from(b64, 'base64')).toString('utf8');
+
+  const oldRetry = "if ((r.status === 401 || r.status === 403) && !retried) {\n    state = await refreshScToken(config, state);";
+  const newRetry = "const staleBackupToken = r.status === 404 && state.scTokenSource === 'backup';\n  if ((r.status === 401 || r.status === 403 || staleBackupToken) && !retried) {\n    state = await refreshScToken(config, state);";
+  if (!source.includes(oldRetry)) throw new Error('SCJC stale-token patch target is missing');
+  source = source.replace(oldRetry, newRetry);
+  source = source.replace("const VERSION = '1.2.1';", "const VERSION = '1.2.2';");
+
   const target = path.join(__dirname, '.scjc-runtime.js');
-  fs.writeFileSync(target, code);
+  fs.writeFileSync(target, source);
   return target;
 }
 
