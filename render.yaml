@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: nuvio-scjc-addon
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: CONFIG_SECRET
+        generateValue: true
+      - key: LANGUAGE
+        value: sk
+      - key: HDR
+        value: "1"
+      - key: DOLBY_VISION
+        value: "0"
+      - key: OLD_MENU
+        value: "1"
+      - key: RATE_LIMIT_BACKOFF_MS
+        value: "60000"
