@@ -5,6 +5,7 @@ on:
     branches:
       - v2.5-cleanup
       - v2.6-pagination
+      - v2.7-catalog-only
       - main
   pull_request:
     branches:
