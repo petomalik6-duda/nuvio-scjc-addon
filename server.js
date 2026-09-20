@@ -983,6 +983,33 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    setTimeout(async () => {
+      const checks = [
+        ['movie','Pelíšky'],
+        ['movie','Invalid'],
+        ['series','MOST'],
+        ['series','Dunaj']
+      ];
+      for (const [type,q] of checks) {
+        try {
+          const source = type === 'movie' ? 'sc-movie-popular' : 'sc-series-popular';
+          const body = await upstreamJson('/catalog/' + type + '/' + source + '/search=' + encodeURIComponent(q) + '.json');
+          const metas = Array.isArray(body?.metas) ? body.metas.slice(0,8) : [];
+          console.log('[NATIVE_LANG_PROBE]', JSON.stringify({
+            type,q,count:metas.length,
+            results:metas.map(m => ({
+              id:m?.id || null,
+              name:m?.name || null,
+              flags:languageFlags(m),
+              genres:Array.isArray(m?.genres)?m.genres:[],
+              description:String(m?.description || '').slice(0,180)
+            }))
+          }));
+        } catch (err) {
+          console.warn('[NATIVE_LANG_PROBE]', JSON.stringify({type,q,error:err?.message||String(err)}));
+        }
+      }
+    }, 1200).unref?.();
   });
 }
 
