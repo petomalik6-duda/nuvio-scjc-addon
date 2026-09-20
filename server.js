@@ -366,6 +366,19 @@ if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
     setTimeout(async () => {
+      for (const hiddenId of ['sc-concert-latest','sc-concerts-latest','sc-koncert-latest','sc-koncerts-latest','sc-movie-concert']) {
+        try {
+          const body = await upstreamJson('/catalog/movie/' + hiddenId + '.json');
+          const metas = Array.isArray(body && body.metas) ? body.metas : [];
+          console.log('[CONCERT_ROUTE_PROBE]', JSON.stringify({
+            id:hiddenId,
+            count:metas.length,
+            samples:metas.slice(0,5).map((m) => ({ id:m && m.id || null, name:m && m.name || null }))
+          }));
+        } catch (err) {
+          console.warn('[CONCERT_ROUTE_PROBE]', JSON.stringify({ id:hiddenId, error:err && err.message ? err.message : String(err) }));
+        }
+      }
       for (const genre of ['Music','Hudba','Concert','Koncert']) {
         try {
           const body = await upstreamJson('/catalog/movie/sc-movie-filter/genre=' + encodeURIComponent(genre) + '.json');
