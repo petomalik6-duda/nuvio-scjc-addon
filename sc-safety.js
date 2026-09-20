@@ -1,6 +1,39 @@
 'use strict';
 
 const realFetch = global.fetch;
+const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
+
+if (realFetch && CDER_MANIFEST_URL) {
+  const timer = setTimeout(async () => {
+    try {
+      const response = await realFetch(CDER_MANIFEST_URL, {
+        headers: { 'accept': 'application/json', 'user-agent': 'SCJC-cder-probe/1.0' }
+      });
+      const raw = await response.text();
+      let manifest = null;
+      try { manifest = raw ? JSON.parse(raw) : null; } catch {}
+      const safe = {
+        status: response.status,
+        ok: response.ok,
+        id: manifest?.id || null,
+        version: manifest?.version || null,
+        name: manifest?.name || null,
+        resources: Array.isArray(manifest?.resources) ? manifest.resources.map((r) => typeof r === 'string' ? r : r?.name).filter(Boolean) : [],
+        catalogs: Array.isArray(manifest?.catalogs) ? manifest.catalogs.map((c) => ({
+          id: c?.id || null,
+          type: c?.type || null,
+          name: c?.name || null,
+          extra: Array.isArray(c?.extra) ? c.extra.map((e) => e?.name).filter(Boolean) : []
+        })) : [],
+        idPrefixes: Array.isArray(manifest?.idPrefixes) ? manifest.idPrefixes : []
+      };
+      console.log('[CDER_PROBE]', JSON.stringify(safe));
+    } catch (err) {
+      console.warn('[CDER_PROBE] failed', JSON.stringify({ message: err?.message || String(err) }));
+    }
+  }, 1200);
+  timer.unref?.();
+}
 const SC_HOST = 'stream-cinema.online';
 const KRA_HOST = 'api.kra.sk';
 const BLOCK_MS = Math.max(60_000, Number(process.env.SC_BREAKER_MS || 30 * 60 * 1000));
