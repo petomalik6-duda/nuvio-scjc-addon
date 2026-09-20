@@ -46,31 +46,9 @@ if (realFetch && CDER_MANIFEST_URL) {
             console.warn('[CDER_FILTER_PROBE] failed', JSON.stringify({ type, message: err?.message || String(err) }));
           }
         }
-        const genreChecks = [
-          ['movie','Documentary'],
-          ['movie','Animation'],
-          ['movie','Music'],
-          ['movie','Sport']
-        ];
-        for (const [type, genre] of genreChecks) {
-          try {
-            const url = base + '/catalog/' + type + '/sc-' + type + '-filter/genre=' + encodeURIComponent(genre) + '.json';
-            const gr = await realFetch(url, { headers: { 'accept': 'application/json', 'user-agent': 'SCJC-cder-probe/1.0' } });
-            const gt = await gr.text();
-            let gj = null;
-            try { gj = gt ? JSON.parse(gt) : null; } catch {}
-            const metas = Array.isArray(gj?.metas) ? gj.metas : [];
-            console.log('[CDER_GENRE_PROBE]', JSON.stringify({
-              type, genre, status: gr.status, count: metas.length,
-              samples: metas.slice(0, 5).map((m) => ({ id: m?.id || null, name: m?.name || null }))
-            }));
-          } catch (err) {
-            console.warn('[CDER_GENRE_PROBE] failed', JSON.stringify({ type, genre, message: err?.message || String(err) }));
-          }
-        }
       }
     } catch (err) {
-      console.warn('[CDER_PROBE] failed, JSON.stringify({ message: err?.message || String(err) }));
+      console.warn('[CDER_PROBE] failed', JSON.stringify({ message: err?.message || String(err) }));
     }
   }, 1200);
   timer.unref?.();
