@@ -3,7 +3,7 @@
 const http = require('node:http');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.CDER_MAX_CONCURRENCY || 3));
@@ -11,8 +11,13 @@ const DEFAULT_BACKOFF_MS = Math.max(60_000, Number(process.env.CDER_BACKOFF_MS |
 const CDER_TIMEOUT_MS = Math.max(3_000, Number(process.env.CDER_TIMEOUT_MS || 10_000));
 const CACHE_MAX_ENTRIES = Math.max(200, Number(process.env.CACHE_MAX_ENTRIES || 2000));
 const ID_MAP_MAX_ENTRIES = Math.max(500, Number(process.env.ID_MAP_MAX_ENTRIES || 5000));
-const PAGE_SIZE = 50;
+const PAGE_SIZE = 100;
+const MAX_CATALOG_ITEMS = 800;
 const UPSTREAM_SCAN_SIZE = 100;
+const DERIVED_CATALOG_CACHE_TTL_MS = 10 * 60 * 1000;
+const DERIVED_CATALOG_CACHE_MAX = 250;
+const MAX_UPSTREAM_PAGES = 40;
+const SEARCH_MAX_UPSTREAM_PAGES = 8;
 
 const CORE_CATALOGS = [
   { id:'sc-movie-latest', type:'movie', name:'⏳ SC: Najnovšie filmy', extra:['skip'], visible:true },
@@ -139,6 +144,7 @@ class BoundedMap {
 }
 
 const cache = new TTLCache(CACHE_MAX_ENTRIES);
+const derivedCatalogCache = new TTLCache(DERIVED_CATALOG_CACHE_MAX);
 const cderIdMap = new BoundedMap(ID_MAP_MAX_ENTRIES);
 const inflight = new Map();
 const waiters = [];
@@ -709,6 +715,26 @@ function mergeAndSortStreams(streams) {
   return out.map(({ __rankLanguage, __rankSize, __rankQuality, ...stream }) => stream);
 }
 
+function catalogPageWindow(value) {
+  const skip = Math.max(0, Math.floor(Number(value) || 0));
+  if (skip >= MAX_CATALOG_ITEMS) return { skip, limit:0, need:skip };
+  const limit = Math.min(PAGE_SIZE, MAX_CATALOG_ITEMS - skip);
+  return { skip, limit, need:skip + limit };
+}
+
+function derivedCatalogKey(custom, search) {
+  return custom.id + '|' + fold(search || '');
+}
+
+function newDerivedCatalogState() {
+  return {
+    metas:[],
+    seen:new Set(),
+    nextPage:0,
+    done:false
+  };
+}
+
 function upstreamCatalogPath(type, id, skip, genre, search) {
   const extras = [];
   if (genre) extras.push('genre=' + encodeURIComponent(genre));
@@ -720,17 +746,27 @@ function upstreamCatalogPath(type, id, skip, genre, search) {
 }
 
 async function customCatalog(custom, extra) {
-  const requestedSkip = Math.max(0, Number(extra.get('skip') || 0));
+  const window = catalogPageWindow(extra.get('skip'));
   const search = String(extra.get('search') || '').trim();
-  const need = requestedSkip + PAGE_SIZE;
-  const matched = [];
 
+  if (window.limit === 0) return { metas:[] };
   if (custom.searchMode && !search) return { metas:[] };
 
-  const pageLimit = Math.max(1, Number(custom.scanPages || 2));
+  const key = derivedCatalogKey(custom, search);
+  let state = derivedCatalogCache.getFresh(key);
+  if (!state) state = newDerivedCatalogState();
 
-  for (let page = 0; page < pageLimit && matched.length < need; page += 1) {
-    const upstreamSkip = page * UPSTREAM_SCAN_SIZE;
+  const pageLimit = custom.searchMode
+    ? SEARCH_MAX_UPSTREAM_PAGES
+    : MAX_UPSTREAM_PAGES;
+
+  while (
+    state.metas.length < window.need &&
+    state.metas.length < MAX_CATALOG_ITEMS &&
+    !state.done &&
+    state.nextPage < pageLimit
+  ) {
+    const upstreamSkip = state.nextPage * UPSTREAM_SCAN_SIZE;
     let body;
 
     try {
@@ -747,20 +783,39 @@ async function customCatalog(custom, extra) {
       break;
     }
 
+    state.nextPage += 1;
+
     const metas = Array.isArray(body?.metas) ? body.metas : [];
-    if (!metas.length) break;
+    if (!metas.length) {
+      state.done = true;
+      break;
+    }
 
     for (const meta of metas) {
       if (Array.isArray(custom.languages) && !matchesLanguages(meta, custom.languages)) continue;
       if (custom.concertOnly && !isConcertLike(meta)) continue;
-      matched.push(rememberCderId(custom.type, meta));
+
+      const normalized = rememberCderId(custom.type, meta);
+      const dedupeKey = String(normalized?.id || meta?.id || '') + '|' + String(normalized?.name || '');
+      if (state.seen.has(dedupeKey)) continue;
+
+      state.seen.add(dedupeKey);
+      state.metas.push(normalized);
+
+      if (state.metas.length >= MAX_CATALOG_ITEMS) {
+        state.done = true;
+        break;
+      }
     }
 
-    if (custom.searchMode === 'upstream' && metas.length < UPSTREAM_SCAN_SIZE) break;
-    if (!custom.searchMode && metas.length < UPSTREAM_SCAN_SIZE) break;
+    if (metas.length < UPSTREAM_SCAN_SIZE) state.done = true;
   }
 
-  return { metas:matched.slice(requestedSkip, requestedSkip + PAGE_SIZE) };
+  derivedCatalogCache.set(key, state, DERIVED_CATALOG_CACHE_TTL_MS);
+
+  return {
+    metas:state.metas.slice(window.skip, window.skip + window.limit)
+  };
 }
 
 function publicOrigin(req) {
@@ -804,6 +859,12 @@ function healthPayload() {
       hits:cache.hits,
       misses:cache.misses,
       evictions:cache.evictions
+    },
+    catalogs:{
+      pageSize:PAGE_SIZE,
+      maxItems:MAX_CATALOG_ITEMS,
+      derivedStates:derivedCatalogCache.size,
+      derivedStateMax:DERIVED_CATALOG_CACHE_MAX
     },
     idMap:{
       size:cderIdMap.size,
@@ -859,9 +920,12 @@ async function handle(req, res) {
       const type = parts[1];
       const id = decodeURIComponent(String(parts[2] || '')).replace(/\.json$/i, '');
 
+      const extra = parseExtraSegment(parts[3], url.searchParams);
+      const page = catalogPageWindow(extra.get('skip'));
+      if (page.limit === 0) return json(res, 200, { metas:[] });
+
       const custom = customMap.get(id);
       if (custom && custom.type === type) {
-        const extra = parseExtraSegment(parts[3], url.searchParams);
         try {
           return json(res, 200, await customCatalog(custom, extra));
         } catch {
@@ -924,6 +988,8 @@ if (require.main === module) {
 
 module.exports = {
   VERSION,
+  PAGE_SIZE,
+  MAX_CATALOG_ITEMS,
   CORE_CATALOGS,
   CUSTOM_CATALOGS,
   TTLCache,
@@ -947,6 +1013,7 @@ module.exports = {
   streamLanguage,
   decorateStream,
   mergeAndSortStreams,
+  catalogPageWindow,
   upstreamCatalogPath,
   healthPayload
 };
