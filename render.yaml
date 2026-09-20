@@ -12,6 +12,11 @@ services:
         value: "20"
       - key: CDER_MANIFEST_URL
         sync: false
+      - key: REDIS_URL
+        fromService:
+          name: nuvio-scjc-cache
+          type: keyvalue
+          property: connectionString
       - key: CDER_MAX_CONCURRENCY
         value: "1"
       - key: CDER_BACKOFF_MS
