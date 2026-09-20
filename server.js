@@ -1,75 +1,168 @@
 'use strict';
 
 const http = require('node:http');
-const crypto = require('node:crypto');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.4.0';
+const VERSION = '2.5.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
-const FSWS_ADDON_BASE = String(process.env.FSWS_ADDON_BASE || 'https://fastshare-stremio-addon-v5-0-smart.onrender.com').trim().replace(/\/$/, '');
-const FALLBACK_TIMEOUT_MS = Math.max(2500, Number(process.env.FSWS_TIMEOUT_MS || 8500));
-const MAX_COMBINED_STREAMS = Math.max(20, Number(process.env.MAX_COMBINED_STREAMS || 80));
-const CONFIG_SECRET = String(process.env.SCJC_CONFIG_SECRET || '').trim();
-const PAGE_SIZE = 50;
-const UPSTREAM_SCAN_SIZE = 100;
-const MAX_SCAN_PAGES = 8;
 const MAX_CONCURRENCY = Math.max(1, Number(process.env.CDER_MAX_CONCURRENCY || 3));
 const DEFAULT_BACKOFF_MS = Math.max(60_000, Number(process.env.CDER_BACKOFF_MS || 5 * 60 * 1000));
+const CDER_TIMEOUT_MS = Math.max(3_000, Number(process.env.CDER_TIMEOUT_MS || 10_000));
+const CACHE_MAX_ENTRIES = Math.max(200, Number(process.env.CACHE_MAX_ENTRIES || 2000));
+const ID_MAP_MAX_ENTRIES = Math.max(500, Number(process.env.ID_MAP_MAX_ENTRIES || 5000));
+const PAGE_SIZE = 50;
+const UPSTREAM_SCAN_SIZE = 100;
 
-const VERIFIED_CATALOGS = [
-  { id:'sc-movie-latest', type:'movie', name:' ⏳SC: Najnovšie filmy', extra:['skip'] },
-  { id:'sc-movie-popular', type:'movie', name:' ⏳SC: Populárne filmy', extra:['search','skip'] },
-  { id:'sc-series-latest', type:'series', name:' ⏳SC: Najnovšie seriály', extra:['skip'] },
-  { id:'sc-series-popular', type:'series', name:' ⏳SC: Populárne seriály', extra:['search','skip'] },
-  { id:'sc-movie-trending', type:'movie', name:' 🔥 SC: Populárne teraz (filmy)', extra:['genre','skip'] },
-  { id:'sc-movie-watching', type:'movie', name:' 👁 SC: Práve sa pozerajú (filmy)', extra:['genre','skip'] },
-  { id:'sc-series-trending', type:'series', name:' 🔥 SC: Populárne teraz (seriály)', extra:['genre','skip'] },
-  { id:'sc-series-watching', type:'series', name:' 👁 SC: Práve sa pozerajú (seriály)', extra:['genre','skip'] },
-  { id:'sc-movie-filter', type:'movie', name:'🔧 SC: Filter filmov', extra:['genre','year','letter','skip'] },
-  { id:'sc-series-filter', type:'series', name:'🔧 SC: Filter seriálov', extra:['genre','year','letter','skip'] }
+const CORE_CATALOGS = [
+  { id:'sc-movie-latest', type:'movie', name:'⏳ SC: Najnovšie filmy', extra:['skip'], visible:true },
+  { id:'sc-movie-popular', type:'movie', name:'⭐ SC: Populárne filmy', extra:['skip'], visible:true },
+  { id:'sc-series-latest', type:'series', name:'⏳ SC: Najnovšie seriály', extra:['skip'], visible:true },
+  { id:'sc-series-popular', type:'series', name:'⭐ SC: Populárne seriály', extra:['skip'], visible:true },
+  { id:'sc-movie-trending', type:'movie', name:'🔥 SC: Populárne teraz (filmy)', extra:['genre','skip'], visible:true },
+  { id:'sc-movie-watching', type:'movie', name:'👁 SC: Práve sa pozerajú (filmy)', extra:['genre','skip'], visible:true },
+  { id:'sc-series-trending', type:'series', name:'🔥 SC: Populárne teraz (seriály)', extra:['genre','skip'], visible:true },
+  { id:'sc-series-watching', type:'series', name:'👁 SC: Práve sa pozerajú (seriály)', extra:['genre','skip'], visible:true },
+
+  // Internal sources for derived catalogs. Hidden from the home screen.
+  { id:'sc-movie-filter', type:'movie', name:'SC movie filter', extra:['genre','year','letter','skip'], visible:false },
+  { id:'sc-series-filter', type:'series', name:'SC series filter', extra:['genre','year','letter','skip'], visible:false }
 ];
 
 const CUSTOM_CATALOGS = [
-  { id:'scx-movie-dubbed-latest', type:'movie', name:'🇨🇿🇸🇰 SC+: Novinky dabované filmy', source:'sc-movie-latest', languages:['CZ','SK'] },
-  { id:'scx-series-dubbed-latest', type:'series', name:'🇨🇿🇸🇰 SC+: Novinky dabované seriály', source:'sc-series-latest', languages:['CZ','SK'] },
-  { id:'scx-movie-cz', type:'movie', name:'🇨🇿 SC+: Filmy s CZ', source:'sc-movie-filter', languages:['CZ'] },
-  { id:'scx-movie-sk', type:'movie', name:'🇸🇰 SC+: Filmy so SK', source:'sc-movie-filter', languages:['SK'] },
-  { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'] },
-  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'] },
-  { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true },
-  { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music' },
-  { id:'scx-search-movies', type:'movie', name:'🔎 SC+: Hľadať filmy', source:'sc-movie-popular', searchMode:'upstream' },
-  { id:'scx-search-series', type:'series', name:'🔎 SC+: Hľadať seriály', source:'sc-series-popular', searchMode:'upstream' },
-  { id:'scx-search-concerts', type:'movie', name:'🔎🎤 SC+: Hľadať koncerty', source:'sc-movie-popular', concertOnly:true, searchMode:'upstream' }
+  { id:'scx-movie-dubbed-latest', type:'movie', name:'🇨🇿🇸🇰 SC+: Novinky dabované filmy', source:'sc-movie-latest', languages:['CZ','SK'], scanPages:2 },
+  { id:'scx-series-dubbed-latest', type:'series', name:'🇨🇿🇸🇰 SC+: Novinky dabované seriály', source:'sc-series-latest', languages:['CZ','SK'], scanPages:2 },
+  { id:'scx-movie-cz', type:'movie', name:'🇨🇿 SC+: Filmy s CZ', source:'sc-movie-filter', languages:['CZ'], scanPages:3 },
+  { id:'scx-movie-sk', type:'movie', name:'🇸🇰 SC+: Filmy so SK', source:'sc-movie-filter', languages:['SK'], scanPages:4 },
+  { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'], scanPages:3 },
+  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'], scanPages:4 },
+  { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true, scanPages:4 },
+  { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music', scanPages:1 },
+
+  { id:'scx-search-movies', type:'movie', name:'🔎 SC+: Hľadať filmy', source:'sc-movie-popular', searchMode:'upstream', scanPages:2 },
+  { id:'scx-search-series', type:'series', name:'🔎 SC+: Hľadať seriály', source:'sc-series-popular', searchMode:'upstream', scanPages:2 },
+  { id:'scx-search-concerts', type:'movie', name:'🔎🎤 SC+: Hľadať koncerty', source:'sc-movie-popular', searchMode:'upstream', concertOnly:true, scanPages:2 }
 ];
 
-const verifiedMap = new Map(VERIFIED_CATALOGS.map((c) => [c.id, c]));
-const customMap = new Map(CUSTOM_CATALOGS.map((c) => [c.id, c]));
-const cderIdMap = new Map();
-const cache = new Map();
+const coreMap = new Map(CORE_CATALOGS.map(c => [c.id, c]));
+const customMap = new Map(CUSTOM_CATALOGS.map(c => [c.id, c]));
+
+const metrics = {
+  startedAt:Date.now(),
+  upstreamRequests:0,
+  upstreamSuccess:0,
+  upstreamErrors:0,
+  upstream429:0,
+  timeouts:0,
+  staleServed:0,
+  totalLatencyMs:0,
+  lastSuccessAt:null,
+  lastError:null
+};
+
+class TTLCache {
+  constructor(maxEntries = 2000) {
+    this.maxEntries = maxEntries;
+    this.map = new Map();
+    this.hits = 0;
+    this.misses = 0;
+    this.evictions = 0;
+  }
+
+  getFresh(key) {
+    const item = this.map.get(key);
+    if (!item) {
+      this.misses += 1;
+      return undefined;
+    }
+    if (item.expiresAt <= Date.now()) {
+      this.misses += 1;
+      return undefined;
+    }
+    this.hits += 1;
+    this.map.delete(key);
+    this.map.set(key, item);
+    return item.value;
+  }
+
+  getStale(key) {
+    const item = this.map.get(key);
+    if (!item) return undefined;
+    this.map.delete(key);
+    this.map.set(key, item);
+    return item.value;
+  }
+
+  set(key, value, ttlMs) {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, { value, expiresAt:Date.now() + ttlMs });
+    while (this.map.size > this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+      this.evictions += 1;
+    }
+  }
+
+  get size() {
+    return this.map.size;
+  }
+}
+
+class BoundedMap {
+  constructor(maxEntries = 5000) {
+    this.maxEntries = maxEntries;
+    this.map = new Map();
+  }
+
+  get(key) {
+    if (!this.map.has(key)) return undefined;
+    const value = this.map.get(key);
+    this.map.delete(key);
+    this.map.set(key, value);
+    return value;
+  }
+
+  set(key, value) {
+    if (this.map.has(key)) this.map.delete(key);
+    this.map.set(key, value);
+    while (this.map.size > this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
+
+  get size() {
+    return this.map.size;
+  }
+}
+
+const cache = new TTLCache(CACHE_MAX_ENTRIES);
+const cderIdMap = new BoundedMap(ID_MAP_MAX_ENTRIES);
 const inflight = new Map();
-let upstreamBackoffUntil = 0;
-let active = 0;
 const waiters = [];
+let active = 0;
+let upstreamBackoffUntil = 0;
 
 function upstreamBase() {
   if (!CDER_MANIFEST_URL) throw new Error('CDER_MANIFEST_URL is not configured');
-  const u = new URL(CDER_MANIFEST_URL);
-  u.pathname = u.pathname.replace(/\/manifest\.json$/i, '/');
-  u.search = '';
-  u.hash = '';
-  return u;
+  const url = new URL(CDER_MANIFEST_URL);
+  url.pathname = url.pathname.replace(/\/manifest\.json$/i, '/');
+  url.search = '';
+  url.hash = '';
+  return url;
 }
 
-function json(res, status, body, extraHeaders) {
+function json(res, status, body, extraHeaders = {}) {
   const data = Buffer.from(JSON.stringify(body));
-  res.writeHead(status, Object.assign({
+  res.writeHead(status, {
     'content-type':'application/json; charset=utf-8',
     'content-length':data.length,
     'access-control-allow-origin':'*',
-    'cache-control':'no-store'
-  }, extraHeaders || {}));
+    'cache-control':'no-store',
+    ...extraHeaders
+  });
   res.end(data);
 }
 
@@ -84,25 +177,28 @@ function html(res, status, body) {
 }
 
 function manifest() {
-  const catalogs = VERIFIED_CATALOGS.map((c) => ({
-    id:c.id,
-    type:c.type,
-    name:c.name,
-    extra:c.extra.map((name) => ({ name, isRequired:false }))
-  })).concat(CUSTOM_CATALOGS.map((c) => ({
-    id:c.id,
-    type:c.type,
-    name:c.name,
-    extra:c.searchMode
-      ? [{ name:'search', isRequired:true }, { name:'skip', isRequired:false }]
-      : [{ name:'skip', isRequired:false }]
-  })));
+  const catalogs = CORE_CATALOGS
+    .filter(c => c.visible)
+    .map(c => ({
+      id:c.id,
+      type:c.type,
+      name:c.name,
+      extra:c.extra.map(name => ({ name, isRequired:false }))
+    }))
+    .concat(CUSTOM_CATALOGS.map(c => ({
+      id:c.id,
+      type:c.type,
+      name:c.name,
+      extra:c.searchMode
+        ? [{ name:'search', isRequired:true }, { name:'skip', isRequired:false }]
+        : [{ name:'skip', isRequired:false }]
+    })));
 
   return {
     id:'community.scjc.cder.bridge',
     version:VERSION,
     name:'SCJC + cder',
-    description:'Safe Nuvio/Stremio bridge over a working cder Stream Cinema addon. No direct KRA/SC login or token refresh.',
+    description:'Safe Nuvio/Stremio bridge over cder Stream Cinema with standard IMDb IDs, search, metadata normalization and CZ/SK-first stream sorting.',
     resources:[
       { name:'catalog', types:['movie','series'], idPrefixes:['tt','sc'] },
       { name:'meta', types:['movie','series'], idPrefixes:['tt','sc'] },
@@ -118,116 +214,33 @@ function manifest() {
 function routeContext(pathname) {
   const parts = String(pathname || '/').split('/').filter(Boolean);
   const roots = new Set(['manifest.json','catalog','meta','stream','health','configure']);
-  let configToken = null;
-  if (parts.length >= 2 && !roots.has(parts[0]) && roots.has(parts[1])) {
-    configToken = parts.shift();
-  }
-  return { route:'/' + parts.join('/'), configToken };
-}
-
-function safeRoute(pathname) {
-  return routeContext(pathname).route;
-}
-
-function configKey() {
-  if (!CONFIG_SECRET) throw new Error('SCJC_CONFIG_SECRET is not configured');
-  return crypto.createHash('sha256').update(CONFIG_SECRET).digest();
-}
-
-function encryptConfig(value) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', configKey(), iv);
-  const payload = Buffer.from(JSON.stringify(value), 'utf8');
-  const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([iv, tag, encrypted]).toString('base64url');
-}
-
-function decryptConfig(token) {
-  try {
-    if (!token) return {};
-    const raw = Buffer.from(String(token), 'base64url');
-    if (raw.length < 29) return {};
-    const iv = raw.subarray(0, 12);
-    const tag = raw.subarray(12, 28);
-    const encrypted = raw.subarray(28);
-    const decipher = crypto.createDecipheriv('aes-256-gcm', configKey(), iv);
-    decipher.setAuthTag(tag);
-    const text = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
-    const parsed = JSON.parse(text);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function normalizeFswsManifestUrl(raw) {
-  const value = String(raw || '').trim();
-  if (!value) return '';
-  const url = new URL(value);
-  const allowed = new URL(FSWS_ADDON_BASE);
-  if (url.protocol !== 'https:' || url.hostname !== allowed.hostname) {
-    throw new Error('Použi nakonfigurovaný FastShare/Webshare manifest z povoleného addonu.');
-  }
-  if (!/\/manifest\.json$/i.test(url.pathname)) {
-    throw new Error('URL musí končiť /manifest.json');
-  }
-  const path = url.pathname.replace(/\/manifest\.json$/i, '').replace(/\/$/, '');
-  if (!path || path === '') throw new Error('Toto je verejný manifest bez konfigurácie providerov.');
-  return url.origin + path;
-}
-
-function requestConfig(token) {
-  const cfg = decryptConfig(token);
-  const fswsBase = String(cfg.fswsBase || '').trim();
-  if (!fswsBase) return {};
-  try {
-    const url = new URL(fswsBase);
-    const allowed = new URL(FSWS_ADDON_BASE);
-    if (url.protocol !== 'https:' || url.hostname !== allowed.hostname) return {};
-    return { fswsBase:url.origin + url.pathname.replace(/\/$/, '') };
-  } catch {
-    return {};
-  }
-}
-
-function readBody(req, maxBytes = 20_000) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', chunk => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        reject(new Error('request body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
-  });
+  // Backward compatibility with old encrypted/configured manifest paths.
+  if (parts.length >= 2 && !roots.has(parts[0]) && roots.has(parts[1])) parts.shift();
+  return '/' + parts.join('/');
 }
 
 function parseExtraSegment(segment, searchParams) {
   const out = new URLSearchParams();
   if (segment) {
-    let raw = decodeURIComponent(String(segment).replace(/\.json$/i, ''));
+    const raw = decodeURIComponent(String(segment).replace(/\.json$/i, ''));
     for (const pair of raw.split('&')) {
       const i = pair.indexOf('=');
       if (i >= 0) out.set(pair.slice(0, i), pair.slice(i + 1));
     }
   }
-  for (const [k,v] of searchParams.entries()) out.set(k,v);
+  for (const [key, value] of searchParams.entries()) out.set(key, value);
   return out;
 }
 
-function fold(v) {
-  return String(v || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+function fold(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
 }
 
 function languageFlags(meta) {
-  const tail = fold(meta && meta.name).slice(-100);
+  const tail = fold(meta?.name).slice(-120);
   return {
     CZ:/\bCZ\b/.test(tail),
     SK:/\bSK\b/.test(tail)
@@ -236,27 +249,33 @@ function languageFlags(meta) {
 
 function matchesLanguages(meta, languages) {
   const flags = languageFlags(meta);
-  return languages.some((lang) => flags[lang]);
+  return languages.some(lang => flags[lang]);
 }
 
 function isConcertLike(meta) {
-  const name = fold(meta && meta.name).replace(/\s+-\s+[A-Z,+ ]+$/, '');
-  return /\bLIVE\b|\bCONCERT\b|\bKONCERT\b|\bTOUR\b|\bUNPLUGGED\b|\bONE NIGHT ONLY\b|\bHOMECOMING\b|\bWEMBLEY\b|\bOLYMPIA\b|\bLIVE SESSION\b|\bLIVE PERFORMANCE\b|\bLIVE EXPERIENCE\b|\bMUSIC FESTIVAL\b/.test(name);
+  const text = fold([
+    meta?.name,
+    meta?.description,
+    ...(Array.isArray(meta?.genres) ? meta.genres : [])
+  ].filter(Boolean).join(' '));
+
+  return /\bLIVE\b|\bCONCERT\b|\bKONCERT\b|\bTOUR\b|\bUNPLUGGED\b|\bONE NIGHT ONLY\b|\bHOMECOMING\b|\bWEMBLEY\b|\bOLYMPIA\b|\bLIVE SESSION\b|\bLIVE PERFORMANCE\b|\bLIVE EXPERIENCE\b|\bMUSIC FESTIVAL\b/.test(text);
 }
 
 function retryAfterMs(headers) {
-  const raw = headers && headers.get ? headers.get('retry-after') : null;
+  const raw = headers?.get?.('retry-after');
   if (!raw) return DEFAULT_BACKOFF_MS;
-  const sec = Number(raw);
-  if (Number.isFinite(sec) && sec >= 0) return Math.max(60_000, sec * 1000);
-  const at = Date.parse(raw);
-  return Number.isFinite(at) ? Math.max(60_000, at - Date.now()) : DEFAULT_BACKOFF_MS;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(60_000, seconds * 1000);
+  const absolute = Date.parse(raw);
+  return Number.isFinite(absolute) ? Math.max(60_000, absolute - Date.now()) : DEFAULT_BACKOFF_MS;
 }
 
 function ttlFor(path) {
-  if (/\/stream\//.test(path)) return 20_000;
-  if (/\/meta\//.test(path)) return 10 * 60 * 1000;
-  if (/\/catalog\//.test(path)) return 2 * 60 * 1000;
+  if (/\/stream\//.test(path)) return 25_000;
+  if (/\/meta\//.test(path)) return 12 * 60 * 60 * 1000;
+  if (/[?/&]search=/.test(path)) return 2 * 60 * 1000;
+  if (/\/catalog\//.test(path)) return 5 * 60 * 1000;
   return 5 * 60 * 1000;
 }
 
@@ -265,7 +284,7 @@ async function acquire() {
     active += 1;
     return;
   }
-  await new Promise((resolve) => waiters.push(resolve));
+  await new Promise(resolve => waiters.push(resolve));
   active += 1;
 }
 
@@ -275,57 +294,102 @@ function release() {
   if (next) next();
 }
 
-async function upstreamJson(path, options) {
-  const key = path;
-  const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && hit.expiresAt > now) return hit.value;
+function recordError(code, status = null) {
+  metrics.lastError = { code, status, at:new Date().toISOString() };
+}
 
-  if (upstreamBackoffUntil > now) {
-    if (hit) return hit.value;
-    const err = new Error('CDER_BACKOFF');
-    err.code = 'CDER_BACKOFF';
-    throw err;
+async function upstreamJson(path, options = {}) {
+  const key = path;
+  const fresh = cache.getFresh(key);
+  if (fresh !== undefined) return fresh;
+
+  const stale = cache.getStale(key);
+  if (upstreamBackoffUntil > Date.now()) {
+    if (stale !== undefined) {
+      metrics.staleServed += 1;
+      return stale;
+    }
+    const error = new Error('CDER_BACKOFF');
+    error.code = 'CDER_BACKOFF';
+    throw error;
   }
 
   if (inflight.has(key)) return inflight.get(key);
 
   const work = (async () => {
     await acquire();
+    const started = Date.now();
+    metrics.upstreamRequests += 1;
+
     try {
-      const url = new URL(path.replace(/^\//,''), upstreamBase());
+      const url = new URL(path.replace(/^\//, ''), upstreamBase());
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Number((options && options.timeoutMs) || 12000));
+      const timer = setTimeout(() => controller.abort(), Number(options.timeoutMs || CDER_TIMEOUT_MS));
+
       try {
         const response = await fetch(url, {
-          headers:{ 'accept':'application/json', 'user-agent':'SCJC-cder-bridge/' + VERSION },
+          headers:{
+            accept:'application/json',
+            'user-agent':'SCJC-cder-bridge/' + VERSION
+          },
           signal:controller.signal
         });
+
         const text = await response.text();
         let body = null;
-        try { body = text ? JSON.parse(text) : null; } catch {}
+        try {
+          body = text ? JSON.parse(text) : null;
+        } catch {
+          body = null;
+        }
 
         if (response.status === 429) {
+          metrics.upstream429 += 1;
+          metrics.upstreamErrors += 1;
           upstreamBackoffUntil = Date.now() + retryAfterMs(response.headers);
-          if (hit) return hit.value;
-          const err = new Error('CDER_RATE_LIMIT');
-          err.code = 'CDER_RATE_LIMIT';
-          throw err;
+          recordError('CDER_RATE_LIMIT', 429);
+          if (stale !== undefined) {
+            metrics.staleServed += 1;
+            return stale;
+          }
+          const error = new Error('CDER_RATE_LIMIT');
+          error.code = 'CDER_RATE_LIMIT';
+          error.status = 429;
+          throw error;
         }
 
         if (!response.ok || body == null) {
-          if (hit) return hit.value;
-          const err = new Error('CDER_HTTP_' + response.status);
-          err.status = response.status;
-          throw err;
+          metrics.upstreamErrors += 1;
+          recordError('CDER_HTTP_' + response.status, response.status);
+          if (stale !== undefined) {
+            metrics.staleServed += 1;
+            return stale;
+          }
+          const error = new Error('CDER_HTTP_' + response.status);
+          error.status = response.status;
+          throw error;
         }
 
-        cache.set(key, { value:body, expiresAt:Date.now() + ttlFor(path) });
+        cache.set(key, body, ttlFor(path));
+        metrics.upstreamSuccess += 1;
+        metrics.lastSuccessAt = new Date().toISOString();
         return body;
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          metrics.timeouts += 1;
+          metrics.upstreamErrors += 1;
+          recordError('CDER_TIMEOUT', null);
+          if (stale !== undefined) {
+            metrics.staleServed += 1;
+            return stale;
+          }
+        }
+        throw error;
       } finally {
         clearTimeout(timer);
       }
     } finally {
+      metrics.totalLatencyMs += Date.now() - started;
       release();
     }
   })();
@@ -338,82 +402,39 @@ async function upstreamJson(path, options) {
   }
 }
 
-
-async function externalJson(url, ttlMs = 20_000) {
-  const key = 'external:' + url;
-  const now = Date.now();
-  const hit = cache.get(key);
-  if (hit && hit.expiresAt > now) return hit.value;
-  if (inflight.has(key)) return inflight.get(key);
-
-  const work = (async () => {
-    await acquire();
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), FALLBACK_TIMEOUT_MS);
-      try {
-        const response = await fetch(url, {
-          headers:{ 'accept':'application/json', 'user-agent':'SCJC-cder-bridge/' + VERSION },
-          signal:controller.signal
-        });
-        if (!response.ok) throw new Error('HTTP_' + response.status);
-        const body = await response.json();
-        cache.set(key, { value:body, expiresAt:Date.now() + ttlMs });
-        return body;
-      } finally {
-        clearTimeout(timer);
-      }
-    } finally {
-      release();
-    }
-  })();
-
-  inflight.set(key, work);
-  try { return await work; }
-  finally { inflight.delete(key); }
-}
-
 function extractImdb(value, seen = new Set(), depth = 0) {
   if (depth > 8 || value == null) return null;
+
   if (typeof value === 'string') {
-    const m = value.match(/\btt\d{5,12}\b/i);
-    return m ? m[0].toLowerCase() : null;
+    const match = value.match(/\btt\d{5,12}\b/i);
+    return match ? match[0].toLowerCase() : null;
   }
+
   if (typeof value !== 'object' || seen.has(value)) return null;
   seen.add(value);
+
   if (Array.isArray(value)) {
     for (const item of value) {
-      const hit = extractImdb(item, seen, depth + 1);
-      if (hit) return hit;
+      const found = extractImdb(item, seen, depth + 1);
+      if (found) return found;
     }
     return null;
   }
+
   const priority = ['imdb_id','imdbId','imdb','external_ids','id'];
   for (const key of priority) {
     if (Object.prototype.hasOwnProperty.call(value, key)) {
-      const hit = extractImdb(value[key], seen, depth + 1);
-      if (hit) return hit;
+      const found = extractImdb(value[key], seen, depth + 1);
+      if (found) return found;
     }
   }
-  for (const item of Object.values(value)) {
-    const hit = extractImdb(item, seen, depth + 1);
-    if (hit) return hit;
-  }
-  return null;
-}
 
-async function resolveImdb(type, id, knownMetaBody = null) {
-  const raw = String(id || '');
-  const first = raw.split(':')[0];
-  if (/^tt\d+$/i.test(first)) return first.toLowerCase();
-  const direct = extractImdb(knownMetaBody);
-  if (direct) return direct;
-  try {
-    const body = await upstreamJson('/meta/' + type + '/' + first + '.json');
-    return extractImdb(body);
-  } catch {
-    return null;
+  for (const item of Object.values(value)) {
+    const found = extractImdb(item, seen, depth + 1);
+    if (found) return found;
   }
+
+  return null;
 }
 
 function cderMapKey(type, imdb) {
@@ -422,12 +443,13 @@ function cderMapKey(type, imdb) {
 
 function rememberCderId(type, meta) {
   if (!meta || typeof meta !== 'object') return meta;
-  const originalId = String(meta.id || '').split(':')[0];
+
+  const originalRoot = String(meta.id || '').split(':')[0];
   const imdb = extractImdb(meta);
   if (!imdb || !/^tt\d+$/i.test(imdb)) return meta;
-  if (/^sc/i.test(originalId)) {
-    cderIdMap.set(cderMapKey(type, imdb), originalId);
-  }
+
+  if (/^sc/i.test(originalRoot)) cderIdMap.set(cderMapKey(type, imdb), originalRoot);
+
   return {
     ...meta,
     id:imdb,
@@ -437,7 +459,9 @@ function rememberCderId(type, meta) {
 }
 
 function standardizeCatalogBody(type, body) {
-  const metas = Array.isArray(body?.metas) ? body.metas.map(meta => rememberCderId(type, meta)) : [];
+  const metas = Array.isArray(body?.metas)
+    ? body.metas.map(meta => rememberCderId(type, meta))
+    : [];
   return { ...body, metas };
 }
 
@@ -445,15 +469,19 @@ function cderSourceId(type, publicId) {
   const raw = String(publicId || '');
   const parts = raw.split(':');
   const root = parts[0];
+
   if (/^sc/i.test(root)) return raw;
   if (!/^tt\d+$/i.test(root)) return raw;
+
   const mapped = cderIdMap.get(cderMapKey(type, root));
   if (!mapped) return raw;
+
   return [mapped, ...parts.slice(1)].join(':');
 }
 
 function standardizeVideos(videos, imdb) {
   if (!Array.isArray(videos) || !imdb) return videos;
+
   return videos.map(video => {
     if (!video || typeof video !== 'object') return video;
     const raw = String(video.id || '');
@@ -465,42 +493,99 @@ function standardizeVideos(videos, imdb) {
   });
 }
 
-function fallbackId(id, imdb) {
-  if (!imdb) return null;
-  const raw = String(id || '');
-  const parts = raw.split(':');
-  if (parts.length >= 3 && /^\d+$/.test(parts[1]) && /^\d+$/.test(parts[2])) {
-    return imdb + ':' + parts[1] + ':' + parts[2];
+function tmdbIdFromMeta(meta) {
+  if (meta?.tmdbId || meta?.tmdb_id) return Number(meta.tmdbId || meta.tmdb_id) || null;
+
+  for (const link of Array.isArray(meta?.links) ? meta.links : []) {
+    const match = String(link?.url || '').match(/themoviedb\.org\/(?:movie|tv)\/(\d+)/i);
+    if (match) return Number(match[1]);
   }
-  const sm = raw.match(/(?:^|:)s?(\d{1,2})e(\d{1,3})$/i);
-  if (sm) return imdb + ':' + Number(sm[1]) + ':' + Number(sm[2]);
-  return imdb;
+
+  return null;
+}
+
+async function enrichedMeta(type, publicId) {
+  const sourceId = cderSourceId(type, publicId);
+  const body = await upstreamJson('/meta/' + type + '/' + encodeURIComponent(sourceId) + '.json');
+  const base = body?.meta && typeof body.meta === 'object' ? body.meta : {};
+
+  const publicRoot = String(publicId || '').split(':')[0];
+  const imdb = /^tt\d+$/i.test(publicRoot)
+    ? publicRoot.toLowerCase()
+    : extractImdb(base);
+
+  if (!imdb) return body;
+
+  if (/^sc/i.test(String(sourceId).split(':')[0])) {
+    cderIdMap.set(cderMapKey(type, imdb), String(sourceId).split(':')[0]);
+  }
+
+  const meta = {
+    ...base,
+    id:imdb,
+    imdb_id:imdb,
+    imdbId:imdb
+  };
+
+  const tmdbId = tmdbIdFromMeta(base);
+  if (tmdbId) meta.tmdbId = tmdbId;
+  if (Array.isArray(base.videos)) meta.videos = standardizeVideos(base.videos, imdb);
+
+  return { ...body, meta };
+}
+
+function streamText(stream) {
+  const supplemental = [
+    stream?.audio,
+    stream?.audios,
+    stream?.language,
+    stream?.languages,
+    stream?.behaviorHints?.audio,
+    stream?.behaviorHints?.languages
+  ];
+
+  return [
+    stream?.name,
+    stream?.title,
+    stream?.description,
+    stream?.behaviorHints?.filename,
+    ...supplemental.map(value => {
+      if (value == null) return '';
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    })
+  ].filter(Boolean).join(' ');
 }
 
 function humanSize(bytes) {
   const n = Number(bytes || 0);
   if (!Number.isFinite(n) || n <= 0) return '';
+
   const units = ['B','KB','MB','GB','TB'];
-  let v = n, i = 0;
-  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-  const digits = i >= 3 ? 1 : 0;
-  return v.toFixed(digits) + ' ' + units[i];
+  let value = n;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+
+  return value.toFixed(index >= 3 ? 1 : 0) + ' ' + units[index];
 }
 
 function streamSize(stream) {
   const hinted = Number(stream?.behaviorHints?.videoSize || stream?.videoSize || stream?.size || 0);
   if (hinted > 0) return hinted;
-  const text = [stream?.title, stream?.name, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' ');
-  const m = text.match(/(\d+(?:[.,]\d+)?)\s*(TB|TIB|GB|GIB|MB|MIB)\b/i);
-  if (!m) return 0;
-  const value = Number(m[1].replace(',', '.'));
-  const unit = m[2].toUpperCase();
-  const mult = unit.startsWith('T') ? 1024 ** 4 : unit.startsWith('G') ? 1024 ** 3 : 1024 ** 2;
-  return Math.round(value * mult);
+
+  const match = streamText(stream).match(/(\d+(?:[.,]\d+)?)\s*(TB|TIB|GB|GIB|MB|MIB)\b/i);
+  if (!match) return 0;
+
+  const value = Number(match[1].replace(',', '.'));
+  const unit = match[2].toUpperCase();
+  const multiplier = unit.startsWith('T') ? 1024 ** 4 : unit.startsWith('G') ? 1024 ** 3 : 1024 ** 2;
+  return Math.round(value * multiplier);
 }
 
 function streamQuality(stream) {
-  const text = fold([stream?.name, stream?.title, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' '));
+  const text = fold(streamText(stream));
   if (/\b(2160P|4K|UHD)\b/.test(text)) return '4K';
   if (/\b1080P\b/.test(text)) return '1080p';
   if (/\b720P\b/.test(text)) return '720p';
@@ -508,27 +593,46 @@ function streamQuality(stream) {
   return '';
 }
 
-function streamProvider(stream) {
-  const text = fold([stream?.name, stream?.title, stream?.description].filter(Boolean).join(' '));
-  if (text.includes('FASTSHARE')) return 'FastShare';
-  if (text.includes('WEBSHARE')) return 'Webshare';
-  return 'Stream Cinema';
+function streamFeatures(stream) {
+  const text = fold(streamText(stream));
+  const features = [];
+
+  if (/\b(DOLBY VISION|DOVI|DV)\b/.test(text)) features.push('DV');
+  else if (/\bHDR10\+\b/.test(text)) features.push('HDR10+');
+  else if (/\bHDR10\b|\bHDR\b/.test(text)) features.push('HDR');
+
+  if (/\b(DOLBY ATMOS|ATMOS)\b/.test(text)) features.push('Atmos');
+  if (/\b(DTS:X|DTS X)\b/.test(text)) features.push('DTS:X');
+
+  if (/\b(AV1)\b/.test(text)) features.push('AV1');
+  else if (/\b(HEVC|H\.?265|X265)\b/.test(text)) features.push('HEVC');
+
+  return features;
 }
 
 function streamLanguage(stream) {
-  const raw = [stream?.name, stream?.title, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' ');
+  const raw = streamText(stream);
   const text = fold(raw);
-  const czSubs = /\b(CZ|CZE|CS|CZECH)\b.{0,16}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
-  const skSubs = /\b(SK|SVK|SLOVAK)\b.{0,16}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
-  const czExplicit = /🇨🇿/.test(raw) || /\b(CZ|CZE|CS|CZECH)\b.{0,18}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
-  const skExplicit = /🇸🇰/.test(raw) || /\b(SK|SVK|SLOVAK)\b.{0,18}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
+
+  const czSubs = /\b(CZ|CZE|CS|CZECH)\b.{0,20}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
+  const skSubs = /\b(SK|SVK|SLOVAK)\b.{0,20}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
+
+  const czExplicit =
+    /🇨🇿/.test(raw) ||
+    /\b(CZ|CZE|CS|CZECH)\b.{0,20}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
+
+  const skExplicit =
+    /🇸🇰/.test(raw) ||
+    /\b(SK|SVK|SLOVAK)\b.{0,20}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
+
   const standaloneCz = !czSubs && /(?:^|[^A-Z])(CZ|CZE|CZECH)(?:[^A-Z]|$)/.test(text);
   const standaloneSk = !skSubs && /(?:^|[^A-Z])(SK|SVK|SLOVAK)(?:[^A-Z]|$)/.test(text);
+
   const cz = czExplicit || standaloneCz;
   const sk = skExplicit || standaloneSk;
   const genericDub = /\b(DABING|DUBBING|DUBBED|DAB|DUB)\b/.test(text);
   const multi = /\b(MULTI|DUAL AUDIO)\b/.test(text);
-  const en = /🇬🇧/.test(raw) || /\b(EN|ENG|ENGLISH)\b.{0,18}\b(AUDIO|DUB|DUBBING)\b/.test(text);
+  const en = /🇬🇧/.test(raw) || /\b(EN|ENG|ENGLISH)\b(?:.{0,20}\b(AUDIO|DUB|DUBBING)\b)?/.test(text);
 
   if (cz && sk) return { rank:50, flag:'🇨🇿🇸🇰', label:'CZ/SK', dubbed:true };
   if (cz) return { rank:50, flag:'🇨🇿', label:'CZ', dubbed:true };
@@ -542,108 +646,65 @@ function streamLanguage(stream) {
 }
 
 function decorateStream(stream) {
-  const provider = streamProvider(stream);
   const language = streamLanguage(stream);
   const size = streamSize(stream);
   const quality = streamQuality(stream);
-  const info = [language.flag, language.label, quality, humanSize(size), provider].filter(Boolean).join(' • ');
+  const features = streamFeatures(stream);
+
+  const info = [
+    language.flag,
+    language.label,
+    quality,
+    ...features,
+    humanSize(size),
+    'Stream Cinema'
+  ].filter(Boolean).join(' • ');
+
   const originalTitle = String(stream?.title || '').trim();
   const originalDescription = String(stream?.description || '').trim();
+
   return {
     ...stream,
-    name: [language.flag, language.label, provider].filter(Boolean).join(' ') || provider,
-    title: originalTitle ? info + '\n' + originalTitle : (originalDescription ? info + '\n' + originalDescription : info),
-    description: originalDescription ? info + '\n' + originalDescription : info,
-    behaviorHints: {
+    name:[language.flag, language.label, 'Stream Cinema'].filter(Boolean).join(' '),
+    title:originalTitle ? info + '\n' + originalTitle : (originalDescription ? info + '\n' + originalDescription : info),
+    description:originalDescription ? info + '\n' + originalDescription : info,
+    behaviorHints:{
       ...(stream?.behaviorHints || {}),
       ...(size ? { videoSize:size } : {})
     },
     __rankLanguage:language.rank,
-    __rankSize:size
+    __rankSize:size,
+    __rankQuality:quality === '4K' ? 4 : quality === '1080p' ? 3 : quality === '720p' ? 2 : quality === '480p' ? 1 : 0
   };
 }
 
-function mergeAndSortStreams(...groups) {
+function mergeAndSortStreams(streams) {
   const seen = new Set();
   const out = [];
-  for (const stream of groups.flat()) {
+
+  for (const stream of Array.isArray(streams) ? streams : []) {
     if (!stream || typeof stream !== 'object') continue;
-    const key = String(stream.url || stream.infoHash || stream.ytId || stream.externalUrl || JSON.stringify(stream)).trim();
+
+    const key = String(
+      stream.url ||
+      stream.infoHash ||
+      stream.ytId ||
+      stream.externalUrl ||
+      JSON.stringify(stream)
+    ).trim();
+
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(decorateStream(stream));
   }
-  out.sort((a,b) =>
+
+  out.sort((a, b) =>
     (b.__rankLanguage - a.__rankLanguage) ||
-    (b.__rankSize - a.__rankSize)
+    (b.__rankSize - a.__rankSize) ||
+    (b.__rankQuality - a.__rankQuality)
   );
-  return out.slice(0, MAX_COMBINED_STREAMS).map(({__rankLanguage,__rankSize,...stream}) => stream);
-}
 
-async function fallbackStreams(type, id, imdb, configuredBase = '') {
-  const mapped = fallbackId(id, imdb);
-  const base = String(configuredBase || '').trim().replace(/\/$/, '');
-  if (!mapped || !base) return [];
-  try {
-    const body = await externalJson(
-      base + '/stream/' + encodeURIComponent(type) + '/' + encodeURIComponent(mapped) + '.json',
-      20_000
-    );
-    return Array.isArray(body?.streams) ? body.streams : [];
-  } catch {
-    return [];
-  }
-}
-
-function preferredLocalizedTitle(metaPayload) {
-  const details = metaPayload?.meta?.localizedTitleData?.aliasDetails;
-  if (!Array.isArray(details)) return '';
-  const cs = details.find(x => ['cs','cz','cze'].includes(String(x?.language || '').toLowerCase()) && x?.title);
-  if (cs) return String(cs.title);
-  const sk = details.find(x => ['sk','svk'].includes(String(x?.language || '').toLowerCase()) && x?.title);
-  return sk?.title ? String(sk.title) : '';
-}
-
-async function fallbackMeta(type, imdb) {
-  if (!imdb || !FSWS_ADDON_BASE) return null;
-  try {
-    return await externalJson(
-      FSWS_ADDON_BASE + '/debug/meta/' + encodeURIComponent(type) + '/' + encodeURIComponent(imdb) + '.json',
-      6 * 60 * 60 * 1000
-    );
-  } catch {
-    return null;
-  }
-}
-
-function tmdbIdFromMeta(meta) {
-  if (meta?.tmdbId || meta?.tmdb_id) return Number(meta.tmdbId || meta.tmdb_id) || null;
-  for (const link of Array.isArray(meta?.links) ? meta.links : []) {
-    const match = String(link?.url || '').match(/themoviedb\.org\/(?:movie|tv)\/(\d+)/i);
-    if (match) return Number(match[1]);
-  }
-  return null;
-}
-
-async function enrichedMeta(type, id, route) {
-  const cderBody = await upstreamJson(route);
-  const imdb = await resolveImdb(type, id, cderBody);
-  if (!imdb) return cderBody;
-  const ext = await fallbackMeta(type, imdb);
-  const base = cderBody?.meta && typeof cderBody.meta === 'object' ? cderBody.meta : {};
-  const raw = ext?.meta?.raw && typeof ext.meta.raw === 'object' ? ext.meta.raw : {};
-  const localName = preferredLocalizedTitle(ext);
-  const merged = {
-    ...raw,
-    ...base,
-    id:imdb,
-    name:base.name || localName || raw.name || raw.title,
-    imdb_id:imdb,
-    imdbId:imdb,
-    tmdbId:ext?.meta?.localizedTitleData?.tmdbId || tmdbIdFromMeta(base) || raw.tmdbId || raw.tmdb_id
-  };
-  if (Array.isArray(base.videos)) merged.videos = standardizeVideos(base.videos, imdb);
-  return { ...cderBody, meta:merged };
+  return out.map(({ __rankLanguage, __rankSize, __rankQuality, ...stream }) => stream);
 }
 
 function upstreamCatalogPath(type, id, skip, genre, search) {
@@ -651,6 +712,7 @@ function upstreamCatalogPath(type, id, skip, genre, search) {
   if (genre) extras.push('genre=' + encodeURIComponent(genre));
   if (search) extras.push('search=' + encodeURIComponent(search));
   if (skip) extras.push('skip=' + Number(skip));
+
   if (!extras.length) return '/catalog/' + type + '/' + id + '.json';
   return '/catalog/' + type + '/' + id + '/' + extras.join('&') + '.json';
 }
@@ -661,13 +723,14 @@ async function customCatalog(custom, extra) {
   const need = requestedSkip + PAGE_SIZE;
   const matched = [];
 
-  if (custom.searchMode === 'upstream' && !search) return { metas:[] };
-  if (custom.searchMode === 'local' && !search) return { metas:[] };
+  if (custom.searchMode && !search) return { metas:[] };
 
-  const pageLimit = custom.searchMode === 'upstream' ? 2 : MAX_SCAN_PAGES;
+  const pageLimit = Math.max(1, Number(custom.scanPages || 2));
+
   for (let page = 0; page < pageLimit && matched.length < need; page += 1) {
     const upstreamSkip = page * UPSTREAM_SCAN_SIZE;
     let body;
+
     try {
       body = await upstreamJson(
         upstreamCatalogPath(
@@ -682,33 +745,20 @@ async function customCatalog(custom, extra) {
       break;
     }
 
-    const metas = Array.isArray(body && body.metas) ? body.metas : [];
+    const metas = Array.isArray(body?.metas) ? body.metas : [];
     if (!metas.length) break;
 
-    const q = fold(search);
     for (const meta of metas) {
       if (Array.isArray(custom.languages) && !matchesLanguages(meta, custom.languages)) continue;
       if (custom.concertOnly && !isConcertLike(meta)) continue;
-      if (custom.searchMode === 'local' && q && !fold(meta?.name).includes(q)) continue;
       matched.push(rememberCderId(custom.type, meta));
     }
 
-    if (custom.searchMode === 'upstream') {
-      // Upstream search is already filtered; avoid unnecessary repeated pages when enough results exist.
-      if (matched.length >= need || metas.length < UPSTREAM_SCAN_SIZE) break;
-    } else if (metas.length < UPSTREAM_SCAN_SIZE) {
-      break;
-    }
+    if (custom.searchMode === 'upstream' && metas.length < UPSTREAM_SCAN_SIZE) break;
+    if (!custom.searchMode && metas.length < UPSTREAM_SCAN_SIZE) break;
   }
 
   return { metas:matched.slice(requestedSkip, requestedSkip + PAGE_SIZE) };
-}
-
-function emptyFor(route) {
-  if (route.startsWith('/catalog/')) return { metas:[] };
-  if (route.startsWith('/stream/')) return { streams:[] };
-  if (route.startsWith('/meta/')) return { meta:null };
-  return { ok:false, error:'upstream unavailable' };
 }
 
 function publicOrigin(req) {
@@ -717,35 +767,71 @@ function publicOrigin(req) {
   return proto + '://' + host;
 }
 
-function escapeHtml(value) {
-  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function configurePage(req, result = null) {
-  const origin = publicOrigin(req);
-  const plainManifest = origin + '/manifest.json';
-  const resultHtml = result?.manifestUrl
-    ? '<div class="ok"><b>SCJC + FastShare/Webshare je pripravený.</b><br><textarea readonly onclick="this.select()">' + escapeHtml(result.manifestUrl) + '</textarea></div>'
-    : (result?.error ? '<div class="err">' + escapeHtml(result.error) + '</div>' : '');
+function configurePage(req) {
+  const manifestUrl = publicOrigin(req) + '/manifest.json';
   return [
     '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<title>SCJC + cder</title><style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}input,button,textarea{font:inherit;width:100%;box-sizing:border-box;padding:12px;margin:8px 0;border-radius:8px;border:1px solid #444;background:#222;color:#fff}button{background:#1976d2}.box{background:#1b1b1b;padding:18px;border-radius:12px;margin:14px 0}.ok{padding:14px;background:#16391f;border-radius:10px}.err{padding:14px;background:#4a1c1c;border-radius:10px}code{word-break:break-all}a{color:#8ab4ff}</style></head><body>',
+    '<title>SCJC + cder</title>',
+    '<style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}code{word-break:break-all;background:#222;padding:5px 8px;border-radius:6px}.ok{padding:14px;background:#16391f;border-radius:10px}a{color:#8ab4ff}</style>',
+    '</head><body>',
     '<h1>SCJC + cder v' + VERSION + '</h1>',
-    '<div class="box"><h2>Cder-only</h2><p>Bez ďalšej konfigurácie:</p><code>' + escapeHtml(plainManifest) + '</code></div>',
-    '<div class="box"><h2>Pridať FastShare + Webshare streamy</h2>',
-    '<p>Sem vlož svoj už nakonfigurovaný FastShare + Webshare <b>manifest URL</b>. Údaje nevkladaj do chatu. SCJC uloží iba šifrovaný token do novej manifest URL.</p>',
-    '<form method="post" action="/configure"><input name="fswsManifestUrl" type="url" required placeholder="https://fastshare-stremio-addon.../.../manifest.json" autocomplete="off">',
-    '<button type="submit">Vytvoriť SCJC manifest s ďalšími streamami</button></form>',
-    resultHtml,
-    '<p>Poradie streamov: CZ/SK dabing → ostatný dabing → ostatné audio; v rámci rovnakej skupiny väčší súbor vyššie.</p></div>',
-    '<p><a href="/health">Health</a></p></body></html>'
+    '<p>Čistý cder bridge: bez priameho KRA loginu, bez Stream Cinema auth/token a bez sekundárneho FastShare/Webshare proxy.</p>',
+    '<div class="ok"><b>Manifest URL:</b><br><code>' + manifestUrl + '</code></div>',
+    '<p>Filmy a seriály sa publikujú so štandardnými IMDb <code>tt...</code> ID, takže ostatné nainštalované stream addony ich môžu nájsť samostatne.</p>',
+    '<p><a href="/health">Health</a></p>',
+    '</body></html>'
   ].join('');
 }
 
+function healthPayload() {
+  const avgLatencyMs = metrics.upstreamRequests
+    ? Math.round(metrics.totalLatencyMs / metrics.upstreamRequests)
+    : 0;
+
+  return {
+    ok:true,
+    version:VERSION,
+    mode:'cder-proxy',
+    upstreamConfigured:!!CDER_MANIFEST_URL,
+    directKraLogin:false,
+    directScAuth:false,
+    optionalFastshareWebshare:false,
+    cache:{
+      size:cache.size,
+      maxEntries:CACHE_MAX_ENTRIES,
+      hits:cache.hits,
+      misses:cache.misses,
+      evictions:cache.evictions
+    },
+    idMap:{
+      size:cderIdMap.size,
+      maxEntries:ID_MAP_MAX_ENTRIES
+    },
+    upstream:{
+      active,
+      queued:waiters.length,
+      inflight:inflight.size,
+      maxConcurrency:MAX_CONCURRENCY,
+      requests:metrics.upstreamRequests,
+      success:metrics.upstreamSuccess,
+      errors:metrics.upstreamErrors,
+      rateLimited:metrics.upstream429,
+      timeouts:metrics.timeouts,
+      staleServed:metrics.staleServed,
+      avgLatencyMs,
+      backoffSeconds:Math.max(0, Math.ceil((upstreamBackoffUntil - Date.now()) / 1000)),
+      lastSuccessAt:metrics.lastSuccessAt,
+      lastError:metrics.lastError
+    },
+    uptimeSeconds:Math.floor((Date.now() - metrics.startedAt) / 1000),
+    at:new Date().toISOString()
+  };
+}
 
 async function handle(req, res) {
   try {
-    const u = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+    const url = new URL(req.url, 'http://' + (req.headers.host || 'localhost'));
+
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
         'access-control-allow-origin':'*',
@@ -755,48 +841,14 @@ async function handle(req, res) {
       return res.end();
     }
 
-    const ctx = routeContext(u.pathname);
-    const route = ctx.route;
-    const cfg = requestConfig(ctx.configToken);
-
-    if (route === '/configure' && req.method === 'POST') {
-      try {
-        const body = await readBody(req);
-        const form = new URLSearchParams(body);
-        const fswsBase = normalizeFswsManifestUrl(form.get('fswsManifestUrl'));
-        const token = encryptConfig({ fswsBase });
-        const manifestUrl = publicOrigin(req) + '/' + token + '/manifest.json';
-        return html(res, 200, configurePage(req, { manifestUrl }));
-      } catch (err) {
-        return html(res, 400, configurePage(req, { error:err?.message || 'Neplatná konfigurácia.' }));
-      }
-    }
+    const route = routeContext(url.pathname);
 
     if (route === '/' || route === '/configure') return html(res, 200, configurePage(req));
 
-    if (route === '/health') {
-      return json(res, 200, {
-        ok:true,
-        version:VERSION,
-        mode:'cder-proxy',
-        upstreamConfigured:!!CDER_MANIFEST_URL,
-        directKraLogin:false,
-        directScAuth:false,
-        encryptedProviderConfig:!!CONFIG_SECRET,
-        optionalFastshareWebshare:true,
-        cacheEntries:cache.size,
-        upstreamBackoffSeconds:Math.max(0, Math.ceil((upstreamBackoffUntil - Date.now()) / 1000)),
-        at:new Date().toISOString()
-      });
-    }
+    if (route === '/health') return json(res, 200, healthPayload());
 
     if (route === '/manifest.json') {
-      const body = manifest();
-      if (cfg.fswsBase) {
-        body.name = 'SCJC + cder + FS/WS';
-        body.description = 'Stream Cinema via cder plus configured FastShare/Webshare alternatives, with TMDB/Cinemeta metadata enrichment.';
-      }
-      return json(res, 200, body, { 'cache-control':cfg.fswsBase ? 'private, no-store' : 'public, max-age=300' });
+      return json(res, 200, manifest(), { 'cache-control':'public, max-age=300' });
     }
 
     const parts = route.split('/').filter(Boolean);
@@ -804,9 +856,10 @@ async function handle(req, res) {
     if (parts[0] === 'catalog') {
       const type = parts[1];
       const id = decodeURIComponent(String(parts[2] || '')).replace(/\.json$/i, '');
+
       const custom = customMap.get(id);
       if (custom && custom.type === type) {
-        const extra = parseExtraSegment(parts[3], u.searchParams);
+        const extra = parseExtraSegment(parts[3], url.searchParams);
         try {
           return json(res, 200, await customCatalog(custom, extra));
         } catch {
@@ -814,11 +867,11 @@ async function handle(req, res) {
         }
       }
 
-      const known = verifiedMap.get(id);
-      if (!known || known.type !== type) return json(res, 200, { metas:[] });
+      const core = coreMap.get(id);
+      if (!core || core.type !== type) return json(res, 200, { metas:[] });
 
       try {
-        const body = await upstreamJson(route + u.search);
+        const body = await upstreamJson(route + url.search);
         return json(res, 200, standardizeCatalogBody(type, body));
       } catch {
         return json(res, 200, { metas:[] });
@@ -828,12 +881,9 @@ async function handle(req, res) {
     if (parts[0] === 'meta') {
       const type = parts[1];
       const id = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
-      const sourceId = cderSourceId(type, id);
-      const sourceRoute = '/meta/' + type + '/' + encodeURIComponent(sourceId) + '.json' + u.search;
+
       try {
-        const body = await enrichedMeta(type, id, sourceRoute);
-        if (body?.meta) rememberCderId(type, { ...body.meta, id:String(sourceId).split(':')[0] });
-        return json(res, 200, body);
+        return json(res, 200, await enrichedMeta(type, id));
       } catch {
         return json(res, 200, { meta:null });
       }
@@ -841,27 +891,25 @@ async function handle(req, res) {
 
     if (parts[0] === 'stream') {
       const type = parts[1];
-      const id = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
-      const publicRoot = String(id).split(':')[0];
-      const sourceId = cderSourceId(type, id);
-      const sourceRoute = '/stream/' + type + '/' + encodeURIComponent(sourceId) + '.json' + u.search;
+      const publicId = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
+      const sourceId = cderSourceId(type, publicId);
+
       try {
-        const cderPromise = upstreamJson(sourceRoute).catch(() => ({ streams:[] }));
-        const imdbPromise = /^tt\d+$/i.test(publicRoot)
-          ? Promise.resolve(publicRoot.toLowerCase())
-          : resolveImdb(type, sourceId).catch(() => null);
-        const [cderBody, imdb] = await Promise.all([cderPromise, imdbPromise]);
-        const extra = await fallbackStreams(type, id, imdb, cfg.fswsBase || '');
-        const cderStreams = Array.isArray(cderBody?.streams) ? cderBody.streams : [];
-        return json(res, 200, { streams:mergeAndSortStreams(cderStreams, extra) });
+        const body = await upstreamJson('/stream/' + type + '/' + encodeURIComponent(sourceId) + '.json');
+        return json(res, 200, {
+          streams:mergeAndSortStreams(Array.isArray(body?.streams) ? body.streams : [])
+        });
       } catch {
         return json(res, 200, { streams:[] });
       }
     }
 
     return json(res, 404, { error:'not found' });
-  } catch (err) {
-    console.error('[SERVER_ERROR]', JSON.stringify({ message:err && err.message ? err.message : String(err) }));
+  } catch (error) {
+    console.error('[SERVER_ERROR]', JSON.stringify({
+      name:error?.name || 'Error',
+      message:error?.message || String(error)
+    }));
     return json(res, 500, { ok:false, error:'internal error' });
   }
 }
@@ -873,22 +921,30 @@ if (require.main === module) {
 }
 
 module.exports = {
+  VERSION,
+  CORE_CATALOGS,
+  CUSTOM_CATALOGS,
+  TTLCache,
+  BoundedMap,
   manifest,
-  safeRoute,
+  routeContext,
+  parseExtraSegment,
   fold,
   languageFlags,
   matchesLanguages,
   isConcertLike,
   extractImdb,
-  streamLanguage,
-  streamSize,
-  mergeAndSortStreams,
-  encryptConfig,
-  decryptConfig,
-  normalizeFswsManifestUrl,
   rememberCderId,
   standardizeCatalogBody,
   cderSourceId,
   standardizeVideos,
-  upstreamCatalogPath
+  tmdbIdFromMeta,
+  streamSize,
+  streamQuality,
+  streamFeatures,
+  streamLanguage,
+  decorateStream,
+  mergeAndSortStreams,
+  upstreamCatalogPath,
+  healthPayload
 };
