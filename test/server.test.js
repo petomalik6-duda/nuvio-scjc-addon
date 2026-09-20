@@ -5,21 +5,25 @@ const assert = require('node:assert/strict');
 
 const addon = require('../server');
 
-test('manifest exposes user catalogs but hides technical filter catalogs', () => {
+test('manifest exposes only SCJC extension catalogs and never duplicates club.cder resources', () => {
   const manifest = addon.manifest();
   const ids = manifest.catalogs.map(c => c.id);
+  const resources = manifest.resources.map(r => r.name);
 
-  assert.equal(manifest.version, '2.6.1');
-  assert.ok(ids.includes('sc-movie-latest'));
+  assert.equal(manifest.version, '2.7.0');
+  assert.deepEqual(resources, ['catalog']);
+
+  assert.equal(ids.includes('sc-movie-latest'), false);
+  assert.equal(ids.includes('sc-series-latest'), false);
+  assert.equal(ids.includes('sc-movie-popular'), false);
+  assert.equal(ids.includes('sc-series-popular'), false);
+
+  assert.ok(ids.includes('scx-movie-dubbed-latest'));
+  assert.ok(ids.includes('scx-series-dubbed-latest'));
   assert.ok(ids.includes('scx-search-movies'));
   assert.ok(ids.includes('scx-search-series'));
   assert.ok(ids.includes('scx-search-concerts'));
   assert.ok(ids.includes('scx-concerts'));
-  assert.equal(ids.includes('sc-movie-filter'), false);
-  assert.equal(ids.includes('sc-series-filter'), false);
-
-  const popular = manifest.catalogs.find(c => c.id === 'sc-movie-popular');
-  assert.deepEqual(popular.extra.map(x => x.name), ['skip']);
 
   const search = manifest.catalogs.find(c => c.id === 'scx-search-movies');
   assert.deepEqual(search.extra.map(x => x.name), ['search', 'skip']);
@@ -139,7 +143,7 @@ test('health payload does not expose secrets and reports bounded cache state', (
   const health = addon.healthPayload();
   const serialized = JSON.stringify(health);
 
-  assert.equal(health.version, '2.6.1');
+  assert.equal(health.version, '2.7.0');
   assert.equal(health.directKraLogin, false);
   assert.equal(health.directScAuth, false);
   assert.equal(health.optionalFastshareWebshare, false);
@@ -158,8 +162,11 @@ test('catalog pagination uses 100 items per page and stops at 800', () => {
 });
 
 
-test('anti-burst defaults keep cder traffic conservative', () => {
+test('hard cder traffic limits protect club.cder and KRA', () => {
   assert.equal(addon.MAX_CONCURRENCY, 1);
-  assert.ok(addon.CDER_MIN_INTERVAL_MS >= 500);
-  assert.ok(addon.CUSTOM_CATALOGS.every(c => Number(c.scanPages || 1) <= 2));
+  assert.ok(addon.CDER_MIN_INTERVAL_MS >= 2000);
+  assert.ok(addon.CDER_BUDGET_MAX <= 8);
+  assert.ok(addon.CDER_BUDGET_WINDOW_MS >= 15 * 60 * 1000);
+  assert.ok(addon.MAX_TOTAL_SOURCE_PAGES <= 8);
+  assert.ok(addon.SEARCH_MAX_TOTAL_SOURCE_PAGES <= 2);
 });
