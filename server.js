@@ -43,6 +43,7 @@ const CUSTOM_CATALOGS = [
 
 const verifiedMap = new Map(VERIFIED_CATALOGS.map((c) => [c.id, c]));
 const customMap = new Map(CUSTOM_CATALOGS.map((c) => [c.id, c]));
+const cderIdMap = new Map();
 const cache = new Map();
 const inflight = new Map();
 let upstreamBackoffUntil = 0;
