@@ -619,11 +619,13 @@ function streamLanguage(stream) {
 
   const czExplicit =
     /🇨🇿/.test(raw) ||
-    /\b(CZ|CZE|CS|CZECH)\b.{0,20}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
+    /\b(CZ|CZE|CS|CZECH)\b\s*(?:[:=|,\/-]\s*)?(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text) ||
+    /\b(AUDIO|DAB|DABING|DUB|DUBBING)\b\s*(?:[:=|,\/-]\s*)?(CZ|CZE|CS|CZECH)\b/.test(text);
 
   const skExplicit =
     /🇸🇰/.test(raw) ||
-    /\b(SK|SVK|SLOVAK)\b.{0,20}\b(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text);
+    /\b(SK|SVK|SLOVAK)\b\s*(?:[:=|,\/-]\s*)?(AUDIO|DAB|DABING|DUB|DUBBING)\b/.test(text) ||
+    /\b(AUDIO|DAB|DABING|DUB|DUBBING)\b\s*(?:[:=|,\/-]\s*)?(SK|SVK|SLOVAK)\b/.test(text);
 
   const standaloneCz = !czSubs && /(?:^|[^A-Z])(CZ|CZE|CZECH)(?:[^A-Z]|$)/.test(text);
   const standaloneSk = !skSubs && /(?:^|[^A-Z])(SK|SVK|SLOVAK)(?:[^A-Z]|$)/.test(text);
