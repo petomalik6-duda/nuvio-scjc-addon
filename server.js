@@ -4,7 +4,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
 const FSWS_ADDON_BASE = String(process.env.FSWS_ADDON_BASE || 'https://fastshare-stremio-addon-v5-0-smart.onrender.com').trim().replace(/\/$/, '');
@@ -410,6 +410,55 @@ async function resolveImdb(type, id, knownMetaBody = null) {
   }
 }
 
+function cderMapKey(type, imdb) {
+  return String(type || '') + ':' + String(imdb || '').toLowerCase();
+}
+
+function rememberCderId(type, meta) {
+  if (!meta || typeof meta !== 'object') return meta;
+  const originalId = String(meta.id || '').split(':')[0];
+  const imdb = extractImdb(meta);
+  if (!imdb || !/^tt\d+$/i.test(imdb)) return meta;
+  if (/^sc/i.test(originalId)) {
+    cderIdMap.set(cderMapKey(type, imdb), originalId);
+  }
+  return {
+    ...meta,
+    id:imdb,
+    imdb_id:imdb,
+    imdbId:imdb
+  };
+}
+
+function standardizeCatalogBody(type, body) {
+  const metas = Array.isArray(body?.metas) ? body.metas.map(meta => rememberCderId(type, meta)) : [];
+  return { ...body, metas };
+}
+
+function cderSourceId(type, publicId) {
+  const raw = String(publicId || '');
+  const parts = raw.split(':');
+  const root = parts[0];
+  if (/^sc/i.test(root)) return raw;
+  if (!/^tt\d+$/i.test(root)) return raw;
+  const mapped = cderIdMap.get(cderMapKey(type, root));
+  if (!mapped) return raw;
+  return [mapped, ...parts.slice(1)].join(':');
+}
+
+function standardizeVideos(videos, imdb) {
+  if (!Array.isArray(videos) || !imdb) return videos;
+  return videos.map(video => {
+    if (!video || typeof video !== 'object') return video;
+    const raw = String(video.id || '');
+    const suffix = raw.includes(':') ? raw.split(':').slice(1) : [];
+    return {
+      ...video,
+      id:suffix.length ? [imdb, ...suffix].join(':') : imdb
+    };
+  });
+}
+
 function fallbackId(id, imdb) {
   if (!imdb) return null;
   const raw = String(id || '');
@@ -581,13 +630,13 @@ async function enrichedMeta(type, id, route) {
   const merged = {
     ...raw,
     ...base,
-    id:base.id || String(id).split(':')[0],
+    id:imdb,
     name:base.name || localName || raw.name || raw.title,
     imdb_id:imdb,
     imdbId:imdb,
     tmdbId:ext?.meta?.localizedTitleData?.tmdbId || tmdbIdFromMeta(base) || raw.tmdbId || raw.tmdb_id
   };
-  if (Array.isArray(base.videos)) merged.videos = base.videos;
+  if (Array.isArray(base.videos)) merged.videos = standardizeVideos(base.videos, imdb);
   return { ...cderBody, meta:merged };
 }
 
@@ -618,7 +667,7 @@ async function customCatalog(custom, extra) {
     for (const meta of metas) {
       if (Array.isArray(custom.languages) && !matchesLanguages(meta, custom.languages)) continue;
       if (custom.concertOnly && !isConcertLike(meta)) continue;
-      matched.push(meta);
+      matched.push(rememberCderId(custom.type, meta));
     }
 
     if (metas.length < UPSTREAM_SCAN_SIZE) break;
@@ -742,7 +791,7 @@ async function handle(req, res) {
 
       try {
         const body = await upstreamJson(route + u.search);
-        return json(res, 200, body);
+        return json(res, 200, standardizeCatalogBody(type, body));
       } catch {
         return json(res, 200, { metas:[] });
       }
@@ -751,8 +800,12 @@ async function handle(req, res) {
     if (parts[0] === 'meta') {
       const type = parts[1];
       const id = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
+      const sourceId = cderSourceId(type, id);
+      const sourceRoute = '/meta/' + type + '/' + encodeURIComponent(sourceId) + '.json' + u.search;
       try {
-        return json(res, 200, await enrichedMeta(type, id, route + u.search));
+        const body = await enrichedMeta(type, id, sourceRoute);
+        if (body?.meta) rememberCderId(type, { ...body.meta, id:String(sourceId).split(':')[0] });
+        return json(res, 200, body);
       } catch {
         return json(res, 200, { meta:null });
       }
@@ -761,9 +814,14 @@ async function handle(req, res) {
     if (parts[0] === 'stream') {
       const type = parts[1];
       const id = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
+      const publicRoot = String(id).split(':')[0];
+      const sourceId = cderSourceId(type, id);
+      const sourceRoute = '/stream/' + type + '/' + encodeURIComponent(sourceId) + '.json' + u.search;
       try {
-        const cderPromise = upstreamJson(route + u.search).catch(() => ({ streams:[] }));
-        const imdbPromise = resolveImdb(type, id).catch(() => null);
+        const cderPromise = upstreamJson(sourceRoute).catch(() => ({ streams:[] }));
+        const imdbPromise = /^tt\d+$/i.test(publicRoot)
+          ? Promise.resolve(publicRoot.toLowerCase())
+          : resolveImdb(type, sourceId).catch(() => null);
         const [cderBody, imdb] = await Promise.all([cderPromise, imdbPromise]);
         const extra = await fallbackStreams(type, id, imdb, cfg.fswsBase || '');
         const cderStreams = Array.isArray(cderBody?.streams) ? cderBody.streams : [];
@@ -783,15 +841,6 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
-    setTimeout(async () => {
-      try {
-        const body = await upstreamJson('/catalog/movie/sc-movie-latest.json');
-        const first = Array.isArray(body?.metas) ? body.metas[0] : null;
-        console.log('[CATALOG_ID_PROBE]', JSON.stringify(first));
-      } catch (err) {
-        console.warn('[CATALOG_ID_PROBE] failed', JSON.stringify({message:err?.message||String(err)}));
-      }
-    }, 1200).unref?.();
   });
 }
 
@@ -809,5 +858,9 @@ module.exports = {
   encryptConfig,
   decryptConfig,
   normalizeFswsManifestUrl,
+  rememberCderId,
+  standardizeCatalogBody,
+  cderSourceId,
+  standardizeVideos,
   upstreamCatalogPath
 };
