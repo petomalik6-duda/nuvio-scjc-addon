@@ -1,11 +1,14 @@
 'use strict';
 
 const http = require('node:http');
+const crypto = require('node:crypto');
+const Redis = require('ioredis');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.7.0';
+const VERSION = '2.8.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
+const REDIS_URL = String(process.env.REDIS_URL || '').trim();
 const MAX_CONCURRENCY = 1;
 const CDER_MIN_INTERVAL_MS = Math.max(2000, Number(process.env.CDER_MIN_INTERVAL_MS || 2000));
 const DEFAULT_BACKOFF_MS = Math.max(60 * 60 * 1000, Number(process.env.CDER_BACKOFF_MS || 60 * 60 * 1000));
@@ -17,7 +20,9 @@ const ID_MAP_MAX_ENTRIES = Math.max(500, Number(process.env.ID_MAP_MAX_ENTRIES |
 const PAGE_SIZE = 100;
 const MAX_CATALOG_ITEMS = 800;
 const UPSTREAM_SCAN_SIZE = 100;
-const DERIVED_CATALOG_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
+const DERIVED_CATALOG_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const PERSISTENT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const PERSISTENT_OP_TIMEOUT_MS = 1500;
 const DERIVED_CATALOG_CACHE_MAX = 250;
 const MAX_TOTAL_SOURCE_PAGES = 8;
 const SEARCH_MAX_TOTAL_SOURCE_PAGES = 2;
@@ -62,6 +67,10 @@ const metrics = {
   upstreamErrors:0,
   upstream429:0,
   budgetBlocked:0,
+  persistentHits:0,
+  persistentMisses:0,
+  persistentWrites:0,
+  persistentErrors:0,
   timeouts:0,
   staleServed:0,
   totalLatencyMs:0,
@@ -152,11 +161,129 @@ const derivedCatalogCache = new TTLCache(DERIVED_CATALOG_CACHE_MAX);
 const cderIdMap = new BoundedMap(ID_MAP_MAX_ENTRIES);
 const inflight = new Map();
 const waiters = [];
+let redisClient = null;
+let redisConnected = false;
 let active = 0;
 let upstreamBackoffUntil = 0;
 let lastUpstreamStartedAt = 0;
 let budgetWindowStartedAt = Date.now();
 let budgetUsed = 0;
+
+function persistentKey(namespace, key) {
+  const digest = crypto.createHash('sha256').update(String(key)).digest('hex');
+  return 'scjc:v2:' + namespace + ':' + digest;
+}
+
+function withTimeout(promise, ms = PERSISTENT_OP_TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('PERSISTENT_CACHE_TIMEOUT')), ms);
+      timer.unref?.();
+    })
+  ]);
+}
+
+async function getRedisClient() {
+  if (!REDIS_URL) return null;
+  if (!redisClient) {
+    redisClient = new Redis(REDIS_URL, {
+      lazyConnect:true,
+      enableReadyCheck:true,
+      maxRetriesPerRequest:1,
+      connectTimeout:PERSISTENT_OP_TIMEOUT_MS,
+      retryStrategy(times) {
+        if (times > 2) return null;
+        return Math.min(250 * times, 750);
+      }
+    });
+    redisClient.on('ready', () => { redisConnected = true; });
+    redisClient.on('close', () => { redisConnected = false; });
+    redisClient.on('error', () => {
+      redisConnected = false;
+      metrics.persistentErrors += 1;
+    });
+  }
+  if (redisClient.status === 'wait') {
+    try {
+      await withTimeout(redisClient.connect());
+    } catch {
+      metrics.persistentErrors += 1;
+      return null;
+    }
+  }
+  return redisClient;
+}
+
+async function persistentRead(namespace, key) {
+  const client = await getRedisClient();
+  if (!client) return null;
+  try {
+    const raw = await withTimeout(client.get(persistentKey(namespace, key)));
+    if (!raw) {
+      metrics.persistentMisses += 1;
+      return null;
+    }
+    const record = JSON.parse(raw);
+    if (!record || !Object.prototype.hasOwnProperty.call(record, 'value')) {
+      metrics.persistentMisses += 1;
+      return null;
+    }
+    metrics.persistentHits += 1;
+    return record;
+  } catch {
+    metrics.persistentErrors += 1;
+    return null;
+  }
+}
+
+async function persistentWrite(namespace, key, value, ttlMs) {
+  const client = await getRedisClient();
+  if (!client) return false;
+  const record = JSON.stringify({
+    expiresAt:Date.now() + Math.max(1, Number(ttlMs || 0)),
+    value
+  });
+  try {
+    await withTimeout(client.set(
+      persistentKey(namespace, key),
+      record,
+      'PX',
+      PERSISTENT_RETENTION_MS
+    ));
+    metrics.persistentWrites += 1;
+    return true;
+  } catch {
+    metrics.persistentErrors += 1;
+    return false;
+  }
+}
+
+function persistentFresh(record) {
+  return !!record && Number(record.expiresAt || 0) > Date.now();
+}
+
+function serializeDerivedState(state) {
+  return {
+    metas:Array.isArray(state?.metas) ? state.metas : [],
+    seen:Array.from(state?.seen instanceof Set ? state.seen : []),
+    nextPage:Math.max(0, Number(state?.nextPage || 0)),
+    done:!!state?.done
+  };
+}
+
+function reviveDerivedState(value) {
+  const metas = Array.isArray(value?.metas) ? value.metas : [];
+  const seen = Array.isArray(value?.seen) && value.seen.length
+    ? value.seen
+    : metas.map(meta => String(meta?.id || '') + '|' + String(meta?.name || ''));
+  return {
+    metas,
+    seen:new Set(seen),
+    nextPage:Math.max(0, Number(value?.nextPage || 0)),
+    done:!!value?.done
+  };
+}
 
 function upstreamBase() {
   if (!CDER_MANIFEST_URL) throw new Error('CDER_MANIFEST_URL is not configured');
@@ -275,9 +402,9 @@ function retryAfterMs(headers) {
 }
 
 function ttlFor(path) {
-  if (/[?/&]search=/.test(path)) return 10 * 60 * 1000;
-  if (/\/catalog\//.test(path)) return 60 * 60 * 1000;
-  return 60 * 60 * 1000;
+  if (/[?/&]search=/.test(path)) return 30 * 60 * 1000;
+  if (/\/catalog\//.test(path)) return 6 * 60 * 60 * 1000;
+  return 6 * 60 * 60 * 1000;
 }
 
 async function acquire() {
@@ -337,7 +464,16 @@ async function upstreamJson(path, options = {}) {
   const fresh = cache.getFresh(key);
   if (fresh !== undefined) return fresh;
 
-  const stale = cache.getStale(key);
+  const persisted = await persistentRead('raw', key);
+  if (persistentFresh(persisted)) {
+    const remaining = Math.max(1000, Number(persisted.expiresAt) - Date.now());
+    cache.set(key, persisted.value, remaining);
+    return persisted.value;
+  }
+
+  const localStale = cache.getStale(key);
+  const stale = localStale !== undefined ? localStale : persisted?.value;
+
   if (upstreamBackoffUntil > Date.now()) {
     if (stale !== undefined) {
       metrics.staleServed += 1;
@@ -421,7 +557,9 @@ async function upstreamJson(path, options = {}) {
           throw error;
         }
 
-        cache.set(key, body, ttlFor(path));
+        const ttlMs = ttlFor(path);
+        cache.set(key, body, ttlMs);
+        await persistentWrite('raw', key, body, ttlMs);
         metrics.upstreamSuccess += 1;
         metrics.lastSuccessAt = new Date().toISOString();
         console.log('[CDER_FETCH]', JSON.stringify({
@@ -807,6 +945,19 @@ async function customCatalog(custom, extra) {
 
   const key = derivedCatalogKey(custom, search);
   let state = derivedCatalogCache.getFresh(key);
+  let stalePersistedState = null;
+
+  if (!state) {
+    const persistedState = await persistentRead('derived', key);
+    if (persistentFresh(persistedState)) {
+      state = reviveDerivedState(persistedState.value);
+      const remaining = Math.max(1000, Number(persistedState.expiresAt) - Date.now());
+      derivedCatalogCache.set(key, state, remaining);
+    } else if (persistedState?.value) {
+      stalePersistedState = reviveDerivedState(persistedState.value);
+    }
+  }
+
   if (!state) state = newDerivedCatalogState();
 
   const totalPageLimit = custom.searchMode
@@ -836,6 +987,9 @@ async function customCatalog(custom, extra) {
         )
       );
     } catch {
+      if (!state.metas.length && stalePersistedState?.metas?.length) {
+        state = stalePersistedState;
+      }
       break;
     }
 
@@ -869,6 +1023,12 @@ async function customCatalog(custom, extra) {
   }
 
   derivedCatalogCache.set(key, state, DERIVED_CATALOG_CACHE_TTL_MS);
+  await persistentWrite(
+    'derived',
+    key,
+    serializeDerivedState(state),
+    DERIVED_CATALOG_CACHE_TTL_MS
+  );
 
   return {
     metas:state.metas.slice(window.skip, window.skip + window.limit)
@@ -889,7 +1049,7 @@ function configurePage(req) {
     '<style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}code{word-break:break-all;background:#222;padding:5px 8px;border-radius:6px}.ok{padding:14px;background:#16391f;border-radius:10px}a{color:#8ab4ff}</style>',
     '</head><body>',
     '<h1>SCJC + cder v' + VERSION + '</h1>',
-    '<p>Katalógová nadstavba pre club.cder. SCJC nevykonáva login a neposkytuje meta ani stream resource.</p>',
+    '<p>Katalógová nadstavba pre club.cder s externou persistentnou cache. SCJC nevykonáva login a neposkytuje meta ani stream resource.</p>',
     '<div class="ok"><b>Manifest URL:</b><br><code>' + manifestUrl + '</code></div>',
     '<p>Filmy a seriály sa publikujú so štandardnými IMDb <code>tt...</code> ID, takže ostatné nainštalované stream addony ich môžu nájsť samostatne.</p>',
     '<p><a href="/health">Health</a></p>',
@@ -905,7 +1065,7 @@ function healthPayload() {
   return {
     ok:true,
     version:VERSION,
-    mode:'cder-catalog-only',
+    mode:'cder-catalog-only-persistent-cache',
     upstreamConfigured:!!CDER_MANIFEST_URL,
     directKraLogin:false,
     directScAuth:false,
@@ -916,6 +1076,15 @@ function healthPayload() {
       hits:cache.hits,
       misses:cache.misses,
       evictions:cache.evictions
+    },
+    persistentCache:{
+      enabled:!!REDIS_URL,
+      connected:redisConnected,
+      hits:metrics.persistentHits,
+      misses:metrics.persistentMisses,
+      writes:metrics.persistentWrites,
+      errors:metrics.persistentErrors,
+      retentionDays:Math.round(PERSISTENT_RETENTION_MS / (24 * 60 * 60 * 1000))
     },
     catalogs:{
       pageSize:PAGE_SIZE,
@@ -1040,6 +1209,10 @@ module.exports = {
   CDER_BUDGET_WINDOW_MS,
   MAX_TOTAL_SOURCE_PAGES,
   SEARCH_MAX_TOTAL_SOURCE_PAGES,
+  PERSISTENT_RETENTION_MS,
+  serializeDerivedState,
+  reviveDerivedState,
+  persistentFresh,
   CORE_CATALOGS,
   CUSTOM_CATALOGS,
   TTLCache,
