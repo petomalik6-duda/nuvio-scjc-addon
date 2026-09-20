@@ -643,6 +643,25 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    setTimeout(async () => {
+      try {
+        const metaBody = await upstreamJson('/meta/movie/sc27573.json');
+        const imdb = await resolveImdb('movie', 'sc27573', metaBody);
+        const cderBody = await upstreamJson('/stream/movie/sc27573.json');
+        const extra = await fallbackStreams('movie', 'sc27573', imdb);
+        const merged = mergeAndSortStreams(cderBody?.streams || [], extra || []);
+        console.log('[MERGE_SELFTEST]', JSON.stringify({
+          imdb,
+          cderCount:Array.isArray(cderBody?.streams)?cderBody.streams.length:0,
+          extraCount:Array.isArray(extra)?extra.length:0,
+          mergedCount:merged.length,
+          providers:[...new Set(merged.map(streamProvider))],
+          top:merged.slice(0,5).map(x=>({name:x.name,size:x.behaviorHints?.videoSize||0}))
+        }));
+      } catch (err) {
+        console.warn('[MERGE_SELFTEST] failed', JSON.stringify({message:err?.message||String(err)}));
+      }
+    }, 1200).unref?.();
   });
 }
 
