@@ -3,21 +3,22 @@
 const http = require('node:http');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.6.0';
+const VERSION = '2.6.1';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
-const MAX_CONCURRENCY = Math.max(1, Number(process.env.CDER_MAX_CONCURRENCY || 3));
-const DEFAULT_BACKOFF_MS = Math.max(60_000, Number(process.env.CDER_BACKOFF_MS || 5 * 60 * 1000));
+const MAX_CONCURRENCY = Math.max(1, Number(process.env.CDER_MAX_CONCURRENCY || 1));
+const CDER_MIN_INTERVAL_MS = Math.max(0, Number(process.env.CDER_MIN_INTERVAL_MS || 750));
+const DEFAULT_BACKOFF_MS = Math.max(5 * 60 * 1000, Number(process.env.CDER_BACKOFF_MS || 30 * 60 * 1000));
 const CDER_TIMEOUT_MS = Math.max(3_000, Number(process.env.CDER_TIMEOUT_MS || 10_000));
 const CACHE_MAX_ENTRIES = Math.max(200, Number(process.env.CACHE_MAX_ENTRIES || 2000));
 const ID_MAP_MAX_ENTRIES = Math.max(500, Number(process.env.ID_MAP_MAX_ENTRIES || 5000));
 const PAGE_SIZE = 100;
 const MAX_CATALOG_ITEMS = 800;
 const UPSTREAM_SCAN_SIZE = 100;
-const DERIVED_CATALOG_CACHE_TTL_MS = 10 * 60 * 1000;
+const DERIVED_CATALOG_CACHE_TTL_MS = 30 * 60 * 1000;
 const DERIVED_CATALOG_CACHE_MAX = 250;
-const MAX_UPSTREAM_PAGES = 40;
-const SEARCH_MAX_UPSTREAM_PAGES = 8;
+const MAX_TOTAL_SOURCE_PAGES = 40;
+const SEARCH_MAX_TOTAL_SOURCE_PAGES = 8;
 
 const CORE_CATALOGS = [
   { id:'sc-movie-latest', type:'movie', name:'⏳ SC: Najnovšie filmy', extra:['skip'], visible:true },
@@ -37,11 +38,11 @@ const CORE_CATALOGS = [
 const CUSTOM_CATALOGS = [
   { id:'scx-movie-dubbed-latest', type:'movie', name:'🇨🇿🇸🇰 SC+: Novinky dabované filmy', source:'sc-movie-latest', languages:['CZ','SK'], scanPages:2 },
   { id:'scx-series-dubbed-latest', type:'series', name:'🇨🇿🇸🇰 SC+: Novinky dabované seriály', source:'sc-series-latest', languages:['CZ','SK'], scanPages:2 },
-  { id:'scx-movie-cz', type:'movie', name:'🇨🇿 SC+: Filmy s CZ', source:'sc-movie-filter', languages:['CZ'], scanPages:3 },
-  { id:'scx-movie-sk', type:'movie', name:'🇸🇰 SC+: Filmy so SK', source:'sc-movie-filter', languages:['SK'], scanPages:4 },
-  { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'], scanPages:3 },
-  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'], scanPages:4 },
-  { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true, scanPages:4 },
+  { id:'scx-movie-cz', type:'movie', name:'🇨🇿 SC+: Filmy s CZ', source:'sc-movie-filter', languages:['CZ'], scanPages:2 },
+  { id:'scx-movie-sk', type:'movie', name:'🇸🇰 SC+: Filmy so SK', source:'sc-movie-filter', languages:['SK'], scanPages:2 },
+  { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'], scanPages:2 },
+  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'], scanPages:2 },
+  { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true, scanPages:2 },
   { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music', scanPages:1 },
 
   { id:'scx-search-movies', type:'movie', name:'🔎 SC+: Hľadať filmy', source:'sc-movie-popular', searchMode:'upstream', scanPages:2 },
@@ -150,6 +151,7 @@ const inflight = new Map();
 const waiters = [];
 let active = 0;
 let upstreamBackoffUntil = 0;
+let lastUpstreamStartedAt = 0;
 
 function upstreamBase() {
   if (!CDER_MANIFEST_URL) throw new Error('CDER_MANIFEST_URL is not configured');
@@ -300,6 +302,17 @@ function release() {
   if (next) next();
 }
 
+async function throttleUpstream() {
+  const waitMs = Math.max(0, lastUpstreamStartedAt + CDER_MIN_INTERVAL_MS - Date.now());
+  if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+  lastUpstreamStartedAt = Date.now();
+}
+
+function openBackoff(code, status = null, ms = DEFAULT_BACKOFF_MS) {
+  upstreamBackoffUntil = Math.max(upstreamBackoffUntil, Date.now() + Math.max(60_000, ms));
+  recordError(code, status);
+}
+
 function recordError(code, status = null) {
   metrics.lastError = { code, status, at:new Date().toISOString() };
 }
@@ -324,6 +337,7 @@ async function upstreamJson(path, options = {}) {
 
   const work = (async () => {
     await acquire();
+    await throttleUpstream();
     const started = Date.now();
     metrics.upstreamRequests += 1;
 
@@ -352,8 +366,7 @@ async function upstreamJson(path, options = {}) {
         if (response.status === 429) {
           metrics.upstream429 += 1;
           metrics.upstreamErrors += 1;
-          upstreamBackoffUntil = Date.now() + retryAfterMs(response.headers);
-          recordError('CDER_RATE_LIMIT', 429);
+          openBackoff('CDER_RATE_LIMIT', 429, Math.max(DEFAULT_BACKOFF_MS, retryAfterMs(response.headers)));
           if (stale !== undefined) {
             metrics.staleServed += 1;
             return stale;
@@ -366,7 +379,14 @@ async function upstreamJson(path, options = {}) {
 
         if (!response.ok || body == null) {
           metrics.upstreamErrors += 1;
-          recordError('CDER_HTTP_' + response.status, response.status);
+          const isCatalog = /\/catalog\//.test(path);
+          if (isCatalog && [401,403,404].includes(response.status)) {
+            openBackoff('CDER_CATALOG_BLOCK_' + response.status, response.status);
+          } else if (isCatalog && response.status >= 500) {
+            openBackoff('CDER_CATALOG_HTTP_' + response.status, response.status, Math.min(DEFAULT_BACKOFF_MS, 5 * 60 * 1000));
+          } else {
+            recordError('CDER_HTTP_' + response.status, response.status);
+          }
           if (stale !== undefined) {
             metrics.staleServed += 1;
             return stale;
@@ -384,7 +404,8 @@ async function upstreamJson(path, options = {}) {
         if (error?.name === 'AbortError') {
           metrics.timeouts += 1;
           metrics.upstreamErrors += 1;
-          recordError('CDER_TIMEOUT', null);
+          if (/\/catalog\//.test(path)) openBackoff('CDER_CATALOG_TIMEOUT', null);
+          else recordError('CDER_TIMEOUT', null);
           if (stale !== undefined) {
             metrics.staleServed += 1;
             return stale;
@@ -756,15 +777,18 @@ async function customCatalog(custom, extra) {
   let state = derivedCatalogCache.getFresh(key);
   if (!state) state = newDerivedCatalogState();
 
-  const pageLimit = custom.searchMode
-    ? SEARCH_MAX_UPSTREAM_PAGES
-    : MAX_UPSTREAM_PAGES;
+  const totalPageLimit = custom.searchMode
+    ? SEARCH_MAX_TOTAL_SOURCE_PAGES
+    : MAX_TOTAL_SOURCE_PAGES;
+  const maxPagesThisRequest = Math.max(1, Math.min(2, Number(custom.scanPages || 1)));
+  let pagesThisRequest = 0;
 
   while (
     state.metas.length < window.need &&
     state.metas.length < MAX_CATALOG_ITEMS &&
     !state.done &&
-    state.nextPage < pageLimit
+    state.nextPage < totalPageLimit &&
+    pagesThisRequest < maxPagesThisRequest
   ) {
     const upstreamSkip = state.nextPage * UPSTREAM_SCAN_SIZE;
     let body;
@@ -784,6 +808,7 @@ async function customCatalog(custom, extra) {
     }
 
     state.nextPage += 1;
+    pagesThisRequest += 1;
 
     const metas = Array.isArray(body?.metas) ? body.metas : [];
     if (!metas.length) {
@@ -875,6 +900,7 @@ function healthPayload() {
       queued:waiters.length,
       inflight:inflight.size,
       maxConcurrency:MAX_CONCURRENCY,
+      minIntervalMs:CDER_MIN_INTERVAL_MS,
       requests:metrics.upstreamRequests,
       success:metrics.upstreamSuccess,
       errors:metrics.upstreamErrors,
@@ -990,6 +1016,8 @@ module.exports = {
   VERSION,
   PAGE_SIZE,
   MAX_CATALOG_ITEMS,
+  MAX_CONCURRENCY,
+  CDER_MIN_INTERVAL_MS,
   CORE_CATALOGS,
   CUSTOM_CATALOGS,
   TTLCache,
