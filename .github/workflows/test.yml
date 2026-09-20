@@ -6,6 +6,7 @@ on:
       - v2.5-cleanup
       - v2.6-pagination
       - v2.7-catalog-only
+      - v2.8-persistent-cache
       - main
   pull_request:
     branches:
