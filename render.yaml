@@ -15,9 +15,13 @@ services:
       - key: CDER_MAX_CONCURRENCY
         value: "1"
       - key: CDER_BACKOFF_MS
-        value: "1800000"
+        value: "3600000"
       - key: CDER_MIN_INTERVAL_MS
-        value: "750"
+        value: "2000"
+      - key: CDER_BUDGET_MAX
+        value: "8"
+      - key: CDER_BUDGET_WINDOW_MS
+        value: "900000"
       - key: CDER_TIMEOUT_MS
         value: "10000"
       - key: CACHE_MAX_ENTRIES
