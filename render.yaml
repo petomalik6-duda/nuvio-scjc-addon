@@ -13,9 +13,11 @@ services:
       - key: CDER_MANIFEST_URL
         sync: false
       - key: CDER_MAX_CONCURRENCY
-        value: "3"
+        value: "1"
       - key: CDER_BACKOFF_MS
-        value: "300000"
+        value: "1800000"
+      - key: CDER_MIN_INTERVAL_MS
+        value: "750"
       - key: CDER_TIMEOUT_MS
         value: "10000"
       - key: CACHE_MAX_ENTRIES
