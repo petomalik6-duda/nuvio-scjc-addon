@@ -4,7 +4,7 @@ const http = require('node:http');
 const crypto = require('node:crypto');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.3.0';
+const VERSION = '2.4.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
 const FSWS_ADDON_BASE = String(process.env.FSWS_ADDON_BASE || 'https://fastshare-stremio-addon-v5-0-smart.onrender.com').trim().replace(/\/$/, '');
@@ -38,7 +38,10 @@ const CUSTOM_CATALOGS = [
   { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'] },
   { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'] },
   { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true },
-  { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music' }
+  { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music' },
+  { id:'scx-search-movies', type:'movie', name:'🔎 SC+: Hľadať filmy', source:'sc-movie-popular', searchMode:'upstream' },
+  { id:'scx-search-series', type:'series', name:'🔎 SC+: Hľadať seriály', source:'sc-series-popular', searchMode:'upstream' },
+  { id:'scx-search-concerts', type:'movie', name:'🔎🎤 SC+: Hľadať koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true, searchMode:'local' }
 ];
 
 const verifiedMap = new Map(VERIFIED_CATALOGS.map((c) => [c.id, c]));
@@ -90,7 +93,9 @@ function manifest() {
     id:c.id,
     type:c.type,
     name:c.name,
-    extra:[{ name:'skip', isRequired:false }]
+    extra:c.searchMode
+      ? [{ name:'search', isRequired:true }, { name:'skip', isRequired:false }]
+      : [{ name:'skip', isRequired:false }]
   })));
 
   return {
@@ -641,9 +646,10 @@ async function enrichedMeta(type, id, route) {
   return { ...cderBody, meta:merged };
 }
 
-function upstreamCatalogPath(type, id, skip, genre) {
+function upstreamCatalogPath(type, id, skip, genre, search) {
   const extras = [];
   if (genre) extras.push('genre=' + encodeURIComponent(genre));
+  if (search) extras.push('search=' + encodeURIComponent(search));
   if (skip) extras.push('skip=' + Number(skip));
   if (!extras.length) return '/catalog/' + type + '/' + id + '.json';
   return '/catalog/' + type + '/' + id + '/' + extras.join('&') + '.json';
@@ -651,27 +657,47 @@ function upstreamCatalogPath(type, id, skip, genre) {
 
 async function customCatalog(custom, extra) {
   const requestedSkip = Math.max(0, Number(extra.get('skip') || 0));
+  const search = String(extra.get('search') || '').trim();
   const need = requestedSkip + PAGE_SIZE;
   const matched = [];
+
+  if (custom.searchMode === 'upstream' && !search) return { metas:[] };
+  if (custom.searchMode === 'local' && !search) return { metas:[] };
 
   for (let page = 0; page < MAX_SCAN_PAGES && matched.length < need; page += 1) {
     const upstreamSkip = page * UPSTREAM_SCAN_SIZE;
     let body;
     try {
-      body = await upstreamJson(upstreamCatalogPath(custom.type, custom.source, upstreamSkip, custom.genre));
+      body = await upstreamJson(
+        upstreamCatalogPath(
+          custom.type,
+          custom.source,
+          upstreamSkip,
+          custom.genre,
+          custom.searchMode === 'upstream' ? search : ''
+        )
+      );
     } catch {
       break;
     }
+
     const metas = Array.isArray(body && body.metas) ? body.metas : [];
     if (!metas.length) break;
 
+    const q = fold(search);
     for (const meta of metas) {
       if (Array.isArray(custom.languages) && !matchesLanguages(meta, custom.languages)) continue;
       if (custom.concertOnly && !isConcertLike(meta)) continue;
+      if (custom.searchMode === 'local' && q && !fold(meta?.name).includes(q)) continue;
       matched.push(rememberCderId(custom.type, meta));
     }
 
-    if (metas.length < UPSTREAM_SCAN_SIZE) break;
+    if (custom.searchMode === 'upstream') {
+      // Upstream search is already filtered; avoid unnecessary repeated pages when enough results exist.
+      if (matched.length >= need || metas.length < UPSTREAM_SCAN_SIZE) break;
+    } else if (metas.length < UPSTREAM_SCAN_SIZE) {
+      break;
+    }
   }
 
   return { metas:matched.slice(requestedSkip, requestedSkip + PAGE_SIZE) };
