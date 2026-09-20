@@ -365,22 +365,6 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
-    setTimeout(async () => {
-      try {
-        const empty = new URLSearchParams();
-        const movie = await customCatalog(customMap.get('scx-movie-dubbed-latest'), empty);
-        const series = await customCatalog(customMap.get('scx-series-dubbed-latest'), empty);
-        console.log('[V2_SELFTEST]', JSON.stringify({
-          mode:'cder-proxy',
-          movieDubbedCount:Array.isArray(movie.metas) ? movie.metas.length : 0,
-          seriesDubbedCount:Array.isArray(series.metas) ? series.metas.length : 0,
-          directKraLogin:false,
-          directScAuth:false
-        }));
-      } catch (err) {
-        console.warn('[V2_SELFTEST] failed', JSON.stringify({ message:err && err.message ? err.message : String(err) }));
-      }
-    }, 1200).unref?.();
   });
 }
 
