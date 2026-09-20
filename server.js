@@ -346,7 +346,7 @@ function humanSize(bytes) {
 function streamSize(stream) {
   const hinted = Number(stream?.behaviorHints?.videoSize || stream?.videoSize || stream?.size || 0);
   if (hinted > 0) return hinted;
-  const text = String(stream?.title || '') + ' ' + String(stream?.name || '');
+  const text = [stream?.title, stream?.name, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' ');
   const m = text.match(/(\d+(?:[.,]\d+)?)\s*(TB|TIB|GB|GIB|MB|MIB)\b/i);
   if (!m) return 0;
   const value = Number(m[1].replace(',', '.'));
@@ -356,7 +356,7 @@ function streamSize(stream) {
 }
 
 function streamQuality(stream) {
-  const text = fold([stream?.name, stream?.title, stream?.behaviorHints?.filename].filter(Boolean).join(' '));
+  const text = fold([stream?.name, stream?.title, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' '));
   if (/\b(2160P|4K|UHD)\b/.test(text)) return '4K';
   if (/\b1080P\b/.test(text)) return '1080p';
   if (/\b720P\b/.test(text)) return '720p';
@@ -365,14 +365,14 @@ function streamQuality(stream) {
 }
 
 function streamProvider(stream) {
-  const text = fold([stream?.name, stream?.title].filter(Boolean).join(' '));
+  const text = fold([stream?.name, stream?.title, stream?.description].filter(Boolean).join(' '));
   if (text.includes('FASTSHARE')) return 'FastShare';
   if (text.includes('WEBSHARE')) return 'Webshare';
   return 'Stream Cinema';
 }
 
 function streamLanguage(stream) {
-  const raw = [stream?.name, stream?.title, stream?.behaviorHints?.filename].filter(Boolean).join(' ');
+  const raw = [stream?.name, stream?.title, stream?.description, stream?.behaviorHints?.filename].filter(Boolean).join(' ');
   const text = fold(raw);
   const czSubs = /\b(CZ|CZE|CS|CZECH)\b.{0,16}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
   const skSubs = /\b(SK|SVK|SLOVAK)\b.{0,16}\b(SUB|SUBS|TIT|TITULKY|FORCED)\b/.test(text);
