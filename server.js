@@ -3,32 +3,34 @@
 const http = require('node:http');
 const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.6.1';
+const VERSION = '2.7.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
-const MAX_CONCURRENCY = Math.max(1, Number(process.env.CDER_MAX_CONCURRENCY || 1));
-const CDER_MIN_INTERVAL_MS = Math.max(0, Number(process.env.CDER_MIN_INTERVAL_MS || 750));
-const DEFAULT_BACKOFF_MS = Math.max(5 * 60 * 1000, Number(process.env.CDER_BACKOFF_MS || 30 * 60 * 1000));
+const MAX_CONCURRENCY = 1;
+const CDER_MIN_INTERVAL_MS = Math.max(2000, Number(process.env.CDER_MIN_INTERVAL_MS || 2000));
+const DEFAULT_BACKOFF_MS = Math.max(60 * 60 * 1000, Number(process.env.CDER_BACKOFF_MS || 60 * 60 * 1000));
+const CDER_BUDGET_MAX = Math.max(1, Number(process.env.CDER_BUDGET_MAX || 8));
+const CDER_BUDGET_WINDOW_MS = Math.max(5 * 60 * 1000, Number(process.env.CDER_BUDGET_WINDOW_MS || 15 * 60 * 1000));
 const CDER_TIMEOUT_MS = Math.max(3_000, Number(process.env.CDER_TIMEOUT_MS || 10_000));
 const CACHE_MAX_ENTRIES = Math.max(200, Number(process.env.CACHE_MAX_ENTRIES || 2000));
 const ID_MAP_MAX_ENTRIES = Math.max(500, Number(process.env.ID_MAP_MAX_ENTRIES || 5000));
 const PAGE_SIZE = 100;
 const MAX_CATALOG_ITEMS = 800;
 const UPSTREAM_SCAN_SIZE = 100;
-const DERIVED_CATALOG_CACHE_TTL_MS = 30 * 60 * 1000;
+const DERIVED_CATALOG_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 const DERIVED_CATALOG_CACHE_MAX = 250;
-const MAX_TOTAL_SOURCE_PAGES = 40;
-const SEARCH_MAX_TOTAL_SOURCE_PAGES = 8;
+const MAX_TOTAL_SOURCE_PAGES = 8;
+const SEARCH_MAX_TOTAL_SOURCE_PAGES = 2;
 
 const CORE_CATALOGS = [
-  { id:'sc-movie-latest', type:'movie', name:'⏳ SC: Najnovšie filmy', extra:['skip'], visible:true },
-  { id:'sc-movie-popular', type:'movie', name:'⭐ SC: Populárne filmy', extra:['skip'], visible:true },
-  { id:'sc-series-latest', type:'series', name:'⏳ SC: Najnovšie seriály', extra:['skip'], visible:true },
-  { id:'sc-series-popular', type:'series', name:'⭐ SC: Populárne seriály', extra:['skip'], visible:true },
-  { id:'sc-movie-trending', type:'movie', name:'🔥 SC: Populárne teraz (filmy)', extra:['genre','skip'], visible:true },
-  { id:'sc-movie-watching', type:'movie', name:'👁 SC: Práve sa pozerajú (filmy)', extra:['genre','skip'], visible:true },
-  { id:'sc-series-trending', type:'series', name:'🔥 SC: Populárne teraz (seriály)', extra:['genre','skip'], visible:true },
-  { id:'sc-series-watching', type:'series', name:'👁 SC: Práve sa pozerajú (seriály)', extra:['genre','skip'], visible:true },
+  { id:'sc-movie-latest', type:'movie', name:'⏳ SC: Najnovšie filmy', extra:['skip'], visible:false },
+  { id:'sc-movie-popular', type:'movie', name:'⭐ SC: Populárne filmy', extra:['skip'], visible:false },
+  { id:'sc-series-latest', type:'series', name:'⏳ SC: Najnovšie seriály', extra:['skip'], visible:false },
+  { id:'sc-series-popular', type:'series', name:'⭐ SC: Populárne seriály', extra:['skip'], visible:false },
+  { id:'sc-movie-trending', type:'movie', name:'🔥 SC: Populárne teraz (filmy)', extra:['genre','skip'], visible:false },
+  { id:'sc-movie-watching', type:'movie', name:'👁 SC: Práve sa pozerajú (filmy)', extra:['genre','skip'], visible:false },
+  { id:'sc-series-trending', type:'series', name:'🔥 SC: Populárne teraz (seriály)', extra:['genre','skip'], visible:false },
+  { id:'sc-series-watching', type:'series', name:'👁 SC: Práve sa pozerajú (seriály)', extra:['genre','skip'], visible:false },
 
   // Internal sources for derived catalogs. Hidden from the home screen.
   { id:'sc-movie-filter', type:'movie', name:'SC movie filter', extra:['genre','year','letter','skip'], visible:false },
@@ -59,6 +61,7 @@ const metrics = {
   upstreamSuccess:0,
   upstreamErrors:0,
   upstream429:0,
+  budgetBlocked:0,
   timeouts:0,
   staleServed:0,
   totalLatencyMs:0,
@@ -152,6 +155,8 @@ const waiters = [];
 let active = 0;
 let upstreamBackoffUntil = 0;
 let lastUpstreamStartedAt = 0;
+let budgetWindowStartedAt = Date.now();
+let budgetUsed = 0;
 
 function upstreamBase() {
   if (!CDER_MANIFEST_URL) throw new Error('CDER_MANIFEST_URL is not configured');
@@ -185,32 +190,22 @@ function html(res, status, body) {
 }
 
 function manifest() {
-  const catalogs = CORE_CATALOGS
-    .filter(c => c.visible)
-    .map(c => ({
-      id:c.id,
-      type:c.type,
-      name:c.name,
-      extra:c.extra.map(name => ({ name, isRequired:false }))
-    }))
-    .concat(CUSTOM_CATALOGS.map(c => ({
-      id:c.id,
-      type:c.type,
-      name:c.name,
-      extra:c.searchMode
-        ? [{ name:'search', isRequired:true }, { name:'skip', isRequired:false }]
-        : [{ name:'skip', isRequired:false }]
-    })));
+  const catalogs = CUSTOM_CATALOGS.map(c => ({
+    id:c.id,
+    type:c.type,
+    name:c.name,
+    extra:c.searchMode
+      ? [{ name:'search', isRequired:true }, { name:'skip', isRequired:false }]
+      : [{ name:'skip', isRequired:false }]
+  }));
 
   return {
     id:'community.scjc.cder.bridge',
     version:VERSION,
-    name:'SCJC + cder',
-    description:'Safe Nuvio/Stremio bridge over cder Stream Cinema with standard IMDb IDs, search, metadata normalization and CZ/SK-first stream sorting.',
+    name:'SCJC cder Catalogs',
+    description:'Catalog-only Nuvio/Stremio extension for club.cder. Login, metadata and streams stay in the club.cder addon; SCJC only builds CZ/SK and concert catalogs with standard IMDb IDs.',
     resources:[
-      { name:'catalog', types:['movie','series'], idPrefixes:['tt','sc'] },
-      { name:'meta', types:['movie','series'], idPrefixes:['tt','sc'] },
-      { name:'stream', types:['movie','series'], idPrefixes:['tt','sc'] }
+      { name:'catalog', types:['movie','series'], idPrefixes:['tt','sc'] }
     ],
     types:['movie','series'],
     catalogs,
@@ -280,11 +275,9 @@ function retryAfterMs(headers) {
 }
 
 function ttlFor(path) {
-  if (/\/stream\//.test(path)) return 25_000;
-  if (/\/meta\//.test(path)) return 12 * 60 * 60 * 1000;
-  if (/[?/&]search=/.test(path)) return 2 * 60 * 1000;
-  if (/\/catalog\//.test(path)) return 5 * 60 * 1000;
-  return 5 * 60 * 1000;
+  if (/[?/&]search=/.test(path)) return 10 * 60 * 1000;
+  if (/\/catalog\//.test(path)) return 60 * 60 * 1000;
+  return 60 * 60 * 1000;
 }
 
 async function acquire() {
@@ -317,6 +310,28 @@ function recordError(code, status = null) {
   metrics.lastError = { code, status, at:new Date().toISOString() };
 }
 
+function resetBudgetIfNeeded() {
+  if (Date.now() - budgetWindowStartedAt >= CDER_BUDGET_WINDOW_MS) {
+    budgetWindowStartedAt = Date.now();
+    budgetUsed = 0;
+  }
+}
+
+function consumeBudget() {
+  resetBudgetIfNeeded();
+  if (budgetUsed >= CDER_BUDGET_MAX) {
+    metrics.budgetBlocked += 1;
+    return false;
+  }
+  budgetUsed += 1;
+  return true;
+}
+
+function upstreamKind(path) {
+  if (/\/catalog\//.test(path)) return /[?/&]search=/.test(path) ? 'search' : 'catalog';
+  return 'other';
+}
+
 async function upstreamJson(path, options = {}) {
   const key = path;
   const fresh = cache.getFresh(key);
@@ -334,6 +349,16 @@ async function upstreamJson(path, options = {}) {
   }
 
   if (inflight.has(key)) return inflight.get(key);
+
+  if (!consumeBudget()) {
+    if (stale !== undefined) {
+      metrics.staleServed += 1;
+      return stale;
+    }
+    const error = new Error('CDER_BUDGET');
+    error.code = 'CDER_BUDGET';
+    throw error;
+  }
 
   const work = (async () => {
     await acquire();
@@ -399,6 +424,13 @@ async function upstreamJson(path, options = {}) {
         cache.set(key, body, ttlFor(path));
         metrics.upstreamSuccess += 1;
         metrics.lastSuccessAt = new Date().toISOString();
+        console.log('[CDER_FETCH]', JSON.stringify({
+          kind:upstreamKind(path),
+          status:response.status,
+          ms:Date.now() - started,
+          budgetUsed,
+          budgetMax:CDER_BUDGET_MAX
+        }));
         return body;
       } catch (error) {
         if (error?.name === 'AbortError') {
@@ -780,7 +812,7 @@ async function customCatalog(custom, extra) {
   const totalPageLimit = custom.searchMode
     ? SEARCH_MAX_TOTAL_SOURCE_PAGES
     : MAX_TOTAL_SOURCE_PAGES;
-  const maxPagesThisRequest = Math.max(1, Math.min(2, Number(custom.scanPages || 1)));
+  const maxPagesThisRequest = 1;
   let pagesThisRequest = 0;
 
   while (
@@ -857,7 +889,7 @@ function configurePage(req) {
     '<style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}code{word-break:break-all;background:#222;padding:5px 8px;border-radius:6px}.ok{padding:14px;background:#16391f;border-radius:10px}a{color:#8ab4ff}</style>',
     '</head><body>',
     '<h1>SCJC + cder v' + VERSION + '</h1>',
-    '<p>Čistý cder bridge: bez priameho KRA loginu, bez Stream Cinema auth/token a bez sekundárneho FastShare/Webshare proxy.</p>',
+    '<p>Katalógová nadstavba pre club.cder. SCJC nevykonáva login a neposkytuje meta ani stream resource.</p>',
     '<div class="ok"><b>Manifest URL:</b><br><code>' + manifestUrl + '</code></div>',
     '<p>Filmy a seriály sa publikujú so štandardnými IMDb <code>tt...</code> ID, takže ostatné nainštalované stream addony ich môžu nájsť samostatne.</p>',
     '<p><a href="/health">Health</a></p>',
@@ -873,7 +905,7 @@ function healthPayload() {
   return {
     ok:true,
     version:VERSION,
-    mode:'cder-proxy',
+    mode:'cder-catalog-only',
     upstreamConfigured:!!CDER_MANIFEST_URL,
     directKraLogin:false,
     directScAuth:false,
@@ -905,6 +937,10 @@ function healthPayload() {
       success:metrics.upstreamSuccess,
       errors:metrics.upstreamErrors,
       rateLimited:metrics.upstream429,
+      budgetBlocked:metrics.budgetBlocked,
+      budgetUsed,
+      budgetMax:CDER_BUDGET_MAX,
+      budgetWindowSeconds:Math.round(CDER_BUDGET_WINDOW_MS / 1000),
       timeouts:metrics.timeouts,
       staleServed:metrics.staleServed,
       avgLatencyMs,
@@ -953,47 +989,29 @@ async function handle(req, res) {
       const custom = customMap.get(id);
       if (custom && custom.type === type) {
         try {
-          return json(res, 200, await customCatalog(custom, extra));
+          const body = await customCatalog(custom, extra);
+          const cacheSeconds = custom.searchMode ? 300 : 3600;
+          return json(res, 200, body, {
+            'cache-control':'public, max-age=' + cacheSeconds + ', stale-while-revalidate=21600'
+          });
         } catch {
-          return json(res, 200, { metas:[] });
+          return json(res, 200, { metas:[] }, {
+            'cache-control':'public, max-age=60, stale-while-revalidate=3600'
+          });
         }
       }
 
-      const core = coreMap.get(id);
-      if (!core || core.type !== type) return json(res, 200, { metas:[] });
-
-      try {
-        const body = await upstreamJson(route + url.search);
-        return json(res, 200, standardizeCatalogBody(type, body));
-      } catch {
-        return json(res, 200, { metas:[] });
-      }
+      // Core club.cder catalogs belong to the club.cder addon itself.
+      // Returning empty here also protects users whose client cached an older SCJC manifest.
+      return json(res, 200, { metas:[] }, { 'cache-control':'public, max-age=3600' });
     }
 
     if (parts[0] === 'meta') {
-      const type = parts[1];
-      const id = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
-
-      try {
-        return json(res, 200, await enrichedMeta(type, id));
-      } catch {
-        return json(res, 200, { meta:null });
-      }
+      return json(res, 200, { meta:null }, { 'cache-control':'public, max-age=3600' });
     }
 
     if (parts[0] === 'stream') {
-      const type = parts[1];
-      const publicId = decodeURIComponent(String(parts.slice(2).join('/') || '')).replace(/\.json$/i, '');
-      const sourceId = cderSourceId(type, publicId);
-
-      try {
-        const body = await upstreamJson('/stream/' + type + '/' + encodeURIComponent(sourceId) + '.json');
-        return json(res, 200, {
-          streams:mergeAndSortStreams(Array.isArray(body?.streams) ? body.streams : [])
-        });
-      } catch {
-        return json(res, 200, { streams:[] });
-      }
+      return json(res, 200, { streams:[] }, { 'cache-control':'no-store' });
     }
 
     return json(res, 404, { error:'not found' });
@@ -1018,6 +1036,10 @@ module.exports = {
   MAX_CATALOG_ITEMS,
   MAX_CONCURRENCY,
   CDER_MIN_INTERVAL_MS,
+  CDER_BUDGET_MAX,
+  CDER_BUDGET_WINDOW_MS,
+  MAX_TOTAL_SOURCE_PAGES,
+  SEARCH_MAX_TOTAL_SOURCE_PAGES,
   CORE_CATALOGS,
   CUSTOM_CATALOGS,
   TTLCache,
