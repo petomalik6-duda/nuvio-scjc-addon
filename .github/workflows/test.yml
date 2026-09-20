@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - v2.5-cleanup
+      - v2.6-pagination
       - main
   pull_request:
     branches:
