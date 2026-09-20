@@ -1,17 +1,27 @@
-# SCJC + cder bridge v2.6.0
+# SCJC cder Catalogs v2.7.0
 
-Nuvio/Stremio-compatible bridge over a configured cder Stream Cinema addon.
+SCJC is now a **catalog-only** extension for a separately configured/installed club.cder addon.
 
-## What it does
+## Architecture
 
-- Proxies cder catalogs, metadata and streams.
-- Does **not** perform direct KRA login or Stream Cinema `/auth/token` calls.
-- Converts catalog items to standard IMDb `tt...` IDs when available, so other installed stream add-ons can independently match the same title.
-- Adds CZ/SK dubbed catalogs, music/concert catalogs, and search for movies, series and concerts.
-- Sorts Stream Cinema streams by CZ/SK dubbing first, then file size, then quality.
-- Adds stream labels for language, resolution, HDR/Dolby Vision, Atmos/DTS:X, codec and file size.
-- Uses bounded TTL caching, request coalescing, concurrency limits and 429 backoff.
-- Uses 100-item pages and supports up to 800 items per catalog when the upstream source contains enough matching items.
+- **club.cder** owns KRA/Stream Cinema authentication, metadata and streams.
+- **SCJC** only builds extra CZ/SK dubbed, music/concert and search catalogs from club.cder catalog data.
+- SCJC publishes standard IMDb `tt...` IDs so Nuvio can ask club.cder and other installed stream addons for the actual detail and streams.
+- SCJC does not perform direct KRA login, does not create Stream Cinema tokens, and no longer proxies `meta` or `stream` resources.
+
+## Traffic safety
+
+To avoid triggering upstream blocking:
+
+- only one club.cder request can run at a time;
+- minimum 2 seconds between actual upstream requests;
+- maximum 8 real club.cder fetches per 15-minute process window;
+- a derived catalog processes at most one new source page per client request;
+- at most 8 source pages are scanned for normal catalogs and 2 for search;
+- catalog source responses are cached for 1 hour;
+- derived catalog state is cached for 2 hours;
+- HTTP 401/403/404/429 and catalog timeouts open a long backoff;
+- health checks, startup and CI tests never call club.cder.
 
 ## Install
 
@@ -26,15 +36,15 @@ Status:
 ## Environment
 
 Required:
-- `CDER_MANIFEST_URL` — configured cder manifest URL.
+- `CDER_MANIFEST_URL` — configured club.cder manifest URL.
 
 Optional:
-- `CDER_MAX_CONCURRENCY` — default `3`.
-- `CDER_BACKOFF_MS` — default `300000`.
-- `CDER_TIMEOUT_MS` — default `10000`.
-- `CACHE_MAX_ENTRIES` — default `2000`.
-- `ID_MAP_MAX_ENTRIES` — default `5000`.
+- `CDER_MIN_INTERVAL_MS` — enforced minimum is 2000 ms.
+- `CDER_BACKOFF_MS` — enforced minimum is 1 hour.
+- `CDER_BUDGET_MAX` — default 8.
+- `CDER_BUDGET_WINDOW_MS` — default 15 minutes.
+- `CDER_TIMEOUT_MS` — default 10000 ms.
+- `CACHE_MAX_ENTRIES` — default 2000.
+- `ID_MAP_MAX_ENTRIES` — default 5000.
 
-## Safety model
-
-The bridge never creates or refreshes Stream Cinema tokens and never logs the cder manifest URL. When cder returns HTTP 429, the bridge enters backoff and serves stale cached data when available.
+No credential or configured club.cder URL is logged.
