@@ -650,12 +650,15 @@ if (require.main === module) {
         const cderBody = await upstreamJson('/stream/movie/sc27573.json');
         const extra = await fallbackStreams('movie', 'sc27573', imdb);
         const merged = mergeAndSortStreams(cderBody?.streams || [], extra || []);
+        const matrixExtra = await fallbackStreams('movie', 'tt0133093', 'tt0133093');
         console.log('[MERGE_SELFTEST]', JSON.stringify({
           imdb,
           cderCount:Array.isArray(cderBody?.streams)?cderBody.streams.length:0,
           extraCount:Array.isArray(extra)?extra.length:0,
+          matrixExtraCount:Array.isArray(matrixExtra)?matrixExtra.length:0,
           mergedCount:merged.length,
           providers:[...new Set(merged.map(streamProvider))],
+          matrixProviders:[...new Set((matrixExtra||[]).map(streamProvider))],
           top:merged.slice(0,5).map(x=>({name:x.name,size:x.behaviorHints?.videoSize||0}))
         }));
       } catch (err) {
