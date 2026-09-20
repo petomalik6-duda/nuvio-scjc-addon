@@ -990,6 +990,23 @@ if (require.main === module) {
         ['series','MOST'],
         ['series','Dunaj']
       ];
+      for (const [type,source] of [['movie','sc-movie-filter'],['series','sc-series-filter']]) {
+        try {
+          const body = await upstreamJson('/catalog/' + type + '/' + source + '.json');
+          const metas = Array.isArray(body?.metas) ? body.metas : [];
+          const untagged = metas.filter(m => {
+            const name = fold(m?.name);
+            return !/\b(CZ|SK|EN|DE|FR|IT|ES|PL|RU|HU|JP|KO|CN|PT|NL|TR|DA|NO|FI|SV)\b/.test(name);
+          });
+          console.log('[UNTAGGED_PROBE]', JSON.stringify({
+            type,total:metas.length,untaggedCount:untagged.length,
+            sample:untagged.slice(0,20).map(m=>({id:m?.id||null,name:m?.name||null}))
+          }));
+        } catch (err) {
+          console.warn('[UNTAGGED_PROBE]', JSON.stringify({type,error:err?.message||String(err)}));
+        }
+      }
+
       const countryChecks = [
         ['movie','sc-movie-filter','country=Česko'],
         ['movie','sc-movie-filter','country=Slovensko'],
