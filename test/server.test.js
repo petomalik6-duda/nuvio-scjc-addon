@@ -9,7 +9,7 @@ test('manifest exposes user catalogs but hides technical filter catalogs', () =>
   const manifest = addon.manifest();
   const ids = manifest.catalogs.map(c => c.id);
 
-  assert.equal(manifest.version, '2.5.0');
+  assert.equal(manifest.version, '2.6.0');
   assert.ok(ids.includes('sc-movie-latest'));
   assert.ok(ids.includes('scx-search-movies'));
   assert.ok(ids.includes('scx-search-series'));
@@ -139,10 +139,20 @@ test('health payload does not expose secrets and reports bounded cache state', (
   const health = addon.healthPayload();
   const serialized = JSON.stringify(health);
 
-  assert.equal(health.version, '2.5.0');
+  assert.equal(health.version, '2.6.0');
   assert.equal(health.directKraLogin, false);
   assert.equal(health.directScAuth, false);
   assert.equal(health.optionalFastshareWebshare, false);
   assert.equal(serialized.includes('CDER_MANIFEST_URL'), false);
   assert.ok(health.cache.maxEntries >= 200);
+});
+
+
+test('catalog pagination uses 100 items per page and stops at 800', () => {
+  assert.equal(addon.PAGE_SIZE, 100);
+  assert.equal(addon.MAX_CATALOG_ITEMS, 800);
+  assert.deepEqual(addon.catalogPageWindow(0), { skip:0, limit:100, need:100 });
+  assert.deepEqual(addon.catalogPageWindow(700), { skip:700, limit:100, need:800 });
+  assert.deepEqual(addon.catalogPageWindow(800), { skip:800, limit:0, need:800 });
+  assert.deepEqual(addon.catalogPageWindow(900), { skip:900, limit:0, need:900 });
 });
