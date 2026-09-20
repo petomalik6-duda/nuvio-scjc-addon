@@ -990,6 +990,18 @@ if (require.main === module) {
         ['series','MOST'],
         ['series','Dunaj']
       ];
+      try {
+        const body = await upstreamJson('/catalog/movie/sc-movie-filter/letter=I.json');
+        const metas = Array.isArray(body?.metas) ? body.metas : [];
+        const target = metas.find(m => String(m?.id) === 'sc56554') || null;
+        console.log('[INVALIDA_FILTER_PROBE]', JSON.stringify({
+          count:metas.length,
+          target:target ? {id:target.id,name:target.name,flags:languageFlags(target)} : null
+        }));
+      } catch (err) {
+        console.warn('[INVALIDA_FILTER_PROBE]', JSON.stringify({error:err?.message||String(err)}));
+      }
+
       const nativeFilterChecks = [
         ['movie','sc-movie-filter','year=1999&letter=P','sc1957','Pelíšky'],
         ['movie','sc-movie-filter','year=2023&letter=I','sc56554','Invalida'],
