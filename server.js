@@ -664,7 +664,8 @@ async function customCatalog(custom, extra) {
   if (custom.searchMode === 'upstream' && !search) return { metas:[] };
   if (custom.searchMode === 'local' && !search) return { metas:[] };
 
-  for (let page = 0; page < MAX_SCAN_PAGES && matched.length < need; page += 1) {
+  const pageLimit = custom.searchMode === 'upstream' ? 2 : MAX_SCAN_PAGES;
+  for (let page = 0; page < pageLimit && matched.length < need; page += 1) {
     const upstreamSkip = page * UPSTREAM_SCAN_SIZE;
     let body;
     try {
