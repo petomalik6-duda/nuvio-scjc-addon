@@ -1,12 +1,12 @@
 {
   "name": "nuvio-scjc-addon",
-  "version": "1.2.5",
+  "version": "2.0.0",
   "private": true,
-  "description": "Nuvio/Stremio bridge for an authenticated KRA / Stream Cinema account, reconstructed from the supplied Android APK.",
+  "description": "Safe Nuvio/Stremio bridge over a configured cder Stream Cinema addon. No direct KRA or Stream Cinema authentication.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node -r ./sc-safety.js server.js",
+    "start": "node server.js",
     "test": "node --test"
   },
   "engines": {
