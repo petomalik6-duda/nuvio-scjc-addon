@@ -1,6 +1,6 @@
 {
   "name": "nuvio-scjc-addon",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "private": true,
   "description": "Lean Nuvio/Stremio cder bridge with standard IMDb IDs, search, bounded cache and CZ/SK-first stream sorting.",
   "main": "server.js",
