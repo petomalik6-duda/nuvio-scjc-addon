@@ -1,14 +1,16 @@
 'use strict';
 
 const http = require('node:http');
-const { URL } = require('node:url');
+const crypto = require('node:crypto');
+const { URL, URLSearchParams } = require('node:url');
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
 const FSWS_ADDON_BASE = String(process.env.FSWS_ADDON_BASE || 'https://fastshare-stremio-addon-v5-0-smart.onrender.com').trim().replace(/\/$/, '');
 const FALLBACK_TIMEOUT_MS = Math.max(2500, Number(process.env.FSWS_TIMEOUT_MS || 8500));
 const MAX_COMBINED_STREAMS = Math.max(20, Number(process.env.MAX_COMBINED_STREAMS || 80));
+const CONFIG_SECRET = String(process.env.SCJC_CONFIG_SECRET || '').trim();
 const PAGE_SIZE = 50;
 const UPSTREAM_SCAN_SIZE = 100;
 const MAX_SCAN_PAGES = 8;
@@ -107,11 +109,98 @@ function manifest() {
   };
 }
 
-function safeRoute(pathname) {
+function routeContext(pathname) {
   const parts = String(pathname || '/').split('/').filter(Boolean);
   const roots = new Set(['manifest.json','catalog','meta','stream','health','configure']);
-  if (parts.length >= 2 && !roots.has(parts[0]) && roots.has(parts[1])) parts.shift();
-  return '/' + parts.join('/');
+  let configToken = null;
+  if (parts.length >= 2 && !roots.has(parts[0]) && roots.has(parts[1])) {
+    configToken = parts.shift();
+  }
+  return { route:'/' + parts.join('/'), configToken };
+}
+
+function safeRoute(pathname) {
+  return routeContext(pathname).route;
+}
+
+function configKey() {
+  if (!CONFIG_SECRET) throw new Error('SCJC_CONFIG_SECRET is not configured');
+  return crypto.createHash('sha256').update(CONFIG_SECRET).digest();
+}
+
+function encryptConfig(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', configKey(), iv);
+  const payload = Buffer.from(JSON.stringify(value), 'utf8');
+  const encrypted = Buffer.concat([cipher.update(payload), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString('base64url');
+}
+
+function decryptConfig(token) {
+  try {
+    if (!token) return {};
+    const raw = Buffer.from(String(token), 'base64url');
+    if (raw.length < 29) return {};
+    const iv = raw.subarray(0, 12);
+    const tag = raw.subarray(12, 28);
+    const encrypted = raw.subarray(28);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', configKey(), iv);
+    decipher.setAuthTag(tag);
+    const text = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeFswsManifestUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  const url = new URL(value);
+  const allowed = new URL(FSWS_ADDON_BASE);
+  if (url.protocol !== 'https:' || url.hostname !== allowed.hostname) {
+    throw new Error('Použi nakonfigurovaný FastShare/Webshare manifest z povoleného addonu.');
+  }
+  if (!/\/manifest\.json$/i.test(url.pathname)) {
+    throw new Error('URL musí končiť /manifest.json');
+  }
+  const path = url.pathname.replace(/\/manifest\.json$/i, '').replace(/\/$/, '');
+  if (!path || path === '') throw new Error('Toto je verejný manifest bez konfigurácie providerov.');
+  return url.origin + path;
+}
+
+function requestConfig(token) {
+  const cfg = decryptConfig(token);
+  const fswsBase = String(cfg.fswsBase || '').trim();
+  if (!fswsBase) return {};
+  try {
+    const url = new URL(fswsBase);
+    const allowed = new URL(FSWS_ADDON_BASE);
+    if (url.protocol !== 'https:' || url.hostname !== allowed.hostname) return {};
+    return { fswsBase:url.origin + url.pathname.replace(/\/$/, '') };
+  } catch {
+    return {};
+  }
+}
+
+function readBody(req, maxBytes = 20_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
 }
 
 function parseExtraSegment(segment, searchParams) {
@@ -387,8 +476,8 @@ function streamLanguage(stream) {
   const en = /🇬🇧/.test(raw) || /\b(EN|ENG|ENGLISH)\b.{0,18}\b(AUDIO|DUB|DUBBING)\b/.test(text);
 
   if (cz && sk) return { rank:50, flag:'🇨🇿🇸🇰', label:'CZ/SK', dubbed:true };
-  if (cz) return { rank:45, flag:'🇨🇿', label:'CZ', dubbed:true };
-  if (sk) return { rank:44, flag:'🇸🇰', label:'SK', dubbed:true };
+  if (cz) return { rank:50, flag:'🇨🇿', label:'CZ', dubbed:true };
+  if (sk) return { rank:50, flag:'🇸🇰', label:'SK', dubbed:true };
   if (genericDub) return { rank:35, flag:'🎙️', label:'Dabing', dubbed:true };
   if (multi) return { rank:25, flag:'🌐', label:'MULTI', dubbed:false };
   if (en) return { rank:10, flag:'🇬🇧', label:'EN', dubbed:false };
@@ -404,10 +493,12 @@ function decorateStream(stream) {
   const quality = streamQuality(stream);
   const info = [language.flag, language.label, quality, humanSize(size), provider].filter(Boolean).join(' • ');
   const originalTitle = String(stream?.title || '').trim();
+  const originalDescription = String(stream?.description || '').trim();
   return {
     ...stream,
     name: [language.flag, language.label, provider].filter(Boolean).join(' ') || provider,
-    title: originalTitle ? info + '\n' + originalTitle : info,
+    title: originalTitle ? info + '\n' + originalTitle : (originalDescription ? info + '\n' + originalDescription : info),
+    description: originalDescription ? info + '\n' + originalDescription : info,
     behaviorHints: {
       ...(stream?.behaviorHints || {}),
       ...(size ? { videoSize:size } : {})
@@ -434,12 +525,13 @@ function mergeAndSortStreams(...groups) {
   return out.slice(0, MAX_COMBINED_STREAMS).map(({__rankLanguage,__rankSize,...stream}) => stream);
 }
 
-async function fallbackStreams(type, id, imdb) {
+async function fallbackStreams(type, id, imdb, configuredBase = '') {
   const mapped = fallbackId(id, imdb);
-  if (!mapped || !FSWS_ADDON_BASE) return [];
+  const base = String(configuredBase || '').trim().replace(/\/$/, '');
+  if (!mapped || !base) return [];
   try {
     const body = await externalJson(
-      FSWS_ADDON_BASE + '/stream/' + encodeURIComponent(type) + '/' + encodeURIComponent(mapped) + '.json',
+      base + '/stream/' + encodeURIComponent(type) + '/' + encodeURIComponent(mapped) + '.json',
       20_000
     );
     return Array.isArray(body?.streams) ? body.streams : [];
@@ -469,6 +561,15 @@ async function fallbackMeta(type, imdb) {
   }
 }
 
+function tmdbIdFromMeta(meta) {
+  if (meta?.tmdbId || meta?.tmdb_id) return Number(meta.tmdbId || meta.tmdb_id) || null;
+  for (const link of Array.isArray(meta?.links) ? meta.links : []) {
+    const match = String(link?.url || '').match(/themoviedb\.org\/(?:movie|tv)\/(\d+)/i);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
 async function enrichedMeta(type, id, route) {
   const cderBody = await upstreamJson(route);
   const imdb = await resolveImdb(type, id, cderBody);
@@ -484,7 +585,7 @@ async function enrichedMeta(type, id, route) {
     name:base.name || localName || raw.name || raw.title,
     imdb_id:imdb,
     imdbId:imdb,
-    tmdbId:ext?.meta?.localizedTitleData?.tmdbId || base.tmdbId || raw.tmdbId
+    tmdbId:ext?.meta?.localizedTitleData?.tmdbId || tmdbIdFromMeta(base) || raw.tmdbId || raw.tmdb_id
   };
   if (Array.isArray(base.videos)) merged.videos = base.videos;
   return { ...cderBody, meta:merged };
@@ -533,20 +634,37 @@ function emptyFor(route) {
   return { ok:false, error:'upstream unavailable' };
 }
 
-function configurePage(req) {
-  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0];
-  const host = req.headers.host || 'nuvio-scjc-addon.onrender.com';
-  const manifestUrl = proto + '://' + host + '/manifest.json';
+function publicOrigin(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim() || 'https';
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'nuvio-scjc-addon.onrender.com').split(',')[0].trim();
+  return proto + '://' + host;
+}
+
+function escapeHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function configurePage(req, result = null) {
+  const origin = publicOrigin(req);
+  const plainManifest = origin + '/manifest.json';
+  const resultHtml = result?.manifestUrl
+    ? '<div class="ok"><b>SCJC + FastShare/Webshare je pripravený.</b><br><textarea readonly onclick="this.select()">' + escapeHtml(result.manifestUrl) + '</textarea></div>'
+    : (result?.error ? '<div class="err">' + escapeHtml(result.error) + '</div>' : '');
   return [
     '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">',
-    '<title>SCJC + cder</title><style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}code{word-break:break-all;background:#222;padding:4px 7px;border-radius:6px}.ok{padding:14px;background:#16391f;border-radius:10px}a{color:#8ab4ff}</style></head><body>',
-    '<h1>SCJC + cder</h1>',
-    '<p>Tento variant nepoužíva vlastný KRA login ani Stream Cinema auth/token. Všetky catalog/meta/stream požiadavky idú cez nakonfigurovaný cder addon.</p>',
-    '<div class="ok"><b>Manifest URL:</b><br><code>' + manifestUrl + '</code></div>',
-    '<p>Pridané sú aj CZ/SK katalógy filtrované z cder výsledkov. Pri 429 sa requesty neopakujú; používa sa cache/backoff.</p>',
+    '<title>SCJC + cder</title><style>body{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 18px;background:#111;color:#eee}input,button,textarea{font:inherit;width:100%;box-sizing:border-box;padding:12px;margin:8px 0;border-radius:8px;border:1px solid #444;background:#222;color:#fff}button{background:#1976d2}.box{background:#1b1b1b;padding:18px;border-radius:12px;margin:14px 0}.ok{padding:14px;background:#16391f;border-radius:10px}.err{padding:14px;background:#4a1c1c;border-radius:10px}code{word-break:break-all}a{color:#8ab4ff}</style></head><body>',
+    '<h1>SCJC + cder v' + VERSION + '</h1>',
+    '<div class="box"><h2>Cder-only</h2><p>Bez ďalšej konfigurácie:</p><code>' + escapeHtml(plainManifest) + '</code></div>',
+    '<div class="box"><h2>Pridať FastShare + Webshare streamy</h2>',
+    '<p>Sem vlož svoj už nakonfigurovaný FastShare + Webshare <b>manifest URL</b>. Údaje nevkladaj do chatu. SCJC uloží iba šifrovaný token do novej manifest URL.</p>',
+    '<form method="post" action="/configure"><input name="fswsManifestUrl" type="url" required placeholder="https://fastshare-stremio-addon.../.../manifest.json" autocomplete="off">',
+    '<button type="submit">Vytvoriť SCJC manifest s ďalšími streamami</button></form>',
+    resultHtml,
+    '<p>Poradie streamov: CZ/SK dabing → ostatný dabing → ostatné audio; v rámci rovnakej skupiny väčší súbor vyššie.</p></div>',
     '<p><a href="/health">Health</a></p></body></html>'
   ].join('');
 }
+
 
 async function handle(req, res) {
   try {
@@ -560,7 +678,22 @@ async function handle(req, res) {
       return res.end();
     }
 
-    const route = safeRoute(u.pathname);
+    const ctx = routeContext(u.pathname);
+    const route = ctx.route;
+    const cfg = requestConfig(ctx.configToken);
+
+    if (route === '/configure' && req.method === 'POST') {
+      try {
+        const body = await readBody(req);
+        const form = new URLSearchParams(body);
+        const fswsBase = normalizeFswsManifestUrl(form.get('fswsManifestUrl'));
+        const token = encryptConfig({ fswsBase });
+        const manifestUrl = publicOrigin(req) + '/' + token + '/manifest.json';
+        return html(res, 200, configurePage(req, { manifestUrl }));
+      } catch (err) {
+        return html(res, 400, configurePage(req, { error:err?.message || 'Neplatná konfigurácia.' }));
+      }
+    }
 
     if (route === '/' || route === '/configure') return html(res, 200, configurePage(req));
 
@@ -572,6 +705,8 @@ async function handle(req, res) {
         upstreamConfigured:!!CDER_MANIFEST_URL,
         directKraLogin:false,
         directScAuth:false,
+        encryptedProviderConfig:!!CONFIG_SECRET,
+        optionalFastshareWebshare:true,
         cacheEntries:cache.size,
         upstreamBackoffSeconds:Math.max(0, Math.ceil((upstreamBackoffUntil - Date.now()) / 1000)),
         at:new Date().toISOString()
@@ -579,7 +714,12 @@ async function handle(req, res) {
     }
 
     if (route === '/manifest.json') {
-      return json(res, 200, manifest(), { 'cache-control':'public, max-age=300' });
+      const body = manifest();
+      if (cfg.fswsBase) {
+        body.name = 'SCJC + cder + FS/WS';
+        body.description = 'Stream Cinema via cder plus configured FastShare/Webshare alternatives, with TMDB/Cinemeta metadata enrichment.';
+      }
+      return json(res, 200, body, { 'cache-control':cfg.fswsBase ? 'private, no-store' : 'public, max-age=300' });
     }
 
     const parts = route.split('/').filter(Boolean);
@@ -625,7 +765,7 @@ async function handle(req, res) {
         const cderPromise = upstreamJson(route + u.search).catch(() => ({ streams:[] }));
         const imdbPromise = resolveImdb(type, id).catch(() => null);
         const [cderBody, imdb] = await Promise.all([cderPromise, imdbPromise]);
-        const extra = await fallbackStreams(type, id, imdb);
+        const extra = await fallbackStreams(type, id, imdb, cfg.fswsBase || '');
         const cderStreams = Array.isArray(cderBody?.streams) ? cderBody.streams : [];
         return json(res, 200, { streams:mergeAndSortStreams(cderStreams, extra) });
       } catch {
@@ -643,28 +783,6 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
-    setTimeout(async () => {
-      try {
-        const metaBody = await upstreamJson('/meta/movie/sc27573.json');
-        const imdb = await resolveImdb('movie', 'sc27573', metaBody);
-        const cderBody = await upstreamJson('/stream/movie/sc27573.json');
-        const extra = await fallbackStreams('movie', 'sc27573', imdb);
-        const merged = mergeAndSortStreams(cderBody?.streams || [], extra || []);
-        const matrixExtra = await fallbackStreams('movie', 'tt0133093', 'tt0133093');
-        console.log('[MERGE_SELFTEST]', JSON.stringify({
-          imdb,
-          cderCount:Array.isArray(cderBody?.streams)?cderBody.streams.length:0,
-          extraCount:Array.isArray(extra)?extra.length:0,
-          matrixExtraCount:Array.isArray(matrixExtra)?matrixExtra.length:0,
-          mergedCount:merged.length,
-          providers:[...new Set(merged.map(streamProvider))],
-          matrixProviders:[...new Set((matrixExtra||[]).map(streamProvider))],
-          top:merged.slice(0,5).map(x=>({name:x.name,size:x.behaviorHints?.videoSize||0}))
-        }));
-      } catch (err) {
-        console.warn('[MERGE_SELFTEST] failed', JSON.stringify({message:err?.message||String(err)}));
-      }
-    }, 1200).unref?.();
   });
 }
 
@@ -679,5 +797,8 @@ module.exports = {
   streamLanguage,
   streamSize,
   mergeAndSortStreams,
+  encryptConfig,
+  decryptConfig,
+  normalizeFswsManifestUrl,
   upstreamCatalogPath
 };
