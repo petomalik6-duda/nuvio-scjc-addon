@@ -783,6 +783,15 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    setTimeout(async () => {
+      try {
+        const body = await upstreamJson('/catalog/movie/sc-movie-latest.json');
+        const first = Array.isArray(body?.metas) ? body.metas[0] : null;
+        console.log('[CATALOG_ID_PROBE]', JSON.stringify(first));
+      } catch (err) {
+        console.warn('[CATALOG_ID_PROBE] failed', JSON.stringify({message:err?.message||String(err)}));
+      }
+    }, 1200).unref?.();
   });
 }
 
