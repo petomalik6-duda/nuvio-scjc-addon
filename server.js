@@ -377,6 +377,19 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    setTimeout(async () => {
+      try {
+        const meta = await upstreamJson('/meta/movie/sc27573.json');
+        const streams = await upstreamJson('/stream/movie/sc27573.json');
+        console.log('[SCHEMA_PROBE_META]', JSON.stringify(meta));
+        console.log('[SCHEMA_PROBE_STREAM]', JSON.stringify({
+          count:Array.isArray(streams?.streams)?streams.streams.length:0,
+          streams:Array.isArray(streams?.streams)?streams.streams.slice(0,3):[]
+        }));
+      } catch (err) {
+        console.warn('[SCHEMA_PROBE] failed', JSON.stringify({message:err?.message||String(err)}));
+      }
+    }, 1200).unref?.();
   });
 }
 
