@@ -10,7 +10,7 @@ test('manifest exposes only SCJC extension catalogs and never duplicates club.cd
   const ids = manifest.catalogs.map(c => c.id);
   const resources = manifest.resources.map(r => r.name);
 
-  assert.equal(manifest.version, '2.7.0');
+  assert.equal(manifest.version, '2.8.0');
   assert.deepEqual(resources, ['catalog']);
 
   assert.equal(ids.includes('sc-movie-latest'), false);
@@ -143,7 +143,7 @@ test('health payload does not expose secrets and reports bounded cache state', (
   const health = addon.healthPayload();
   const serialized = JSON.stringify(health);
 
-  assert.equal(health.version, '2.7.0');
+  assert.equal(health.version, '2.8.0');
   assert.equal(health.directKraLogin, false);
   assert.equal(health.directScAuth, false);
   assert.equal(health.optionalFastshareWebshare, false);
@@ -169,4 +169,32 @@ test('hard cder traffic limits protect club.cder and KRA', () => {
   assert.ok(addon.CDER_BUDGET_WINDOW_MS >= 15 * 60 * 1000);
   assert.ok(addon.MAX_TOTAL_SOURCE_PAGES <= 8);
   assert.ok(addon.SEARCH_MAX_TOTAL_SOURCE_PAGES <= 2);
+});
+
+
+test('derived catalog state is safe to store and restore from persistent cache', () => {
+  const state = {
+    metas:[
+      { id:'tt0133093', name:'Matrix - CZ' },
+      { id:'tt12637874', name:'Fallout - CZ' }
+    ],
+    seen:new Set(['tt0133093|Matrix - CZ','tt12637874|Fallout - CZ']),
+    nextPage:3,
+    done:false
+  };
+  const serialized = addon.serializeDerivedState(state);
+  assert.deepEqual(serialized.seen, ['tt0133093|Matrix - CZ','tt12637874|Fallout - CZ']);
+  assert.equal(serialized.nextPage, 3);
+
+  const restored = addon.reviveDerivedState(JSON.parse(JSON.stringify(serialized)));
+  assert.equal(restored.nextPage, 3);
+  assert.equal(restored.done, false);
+  assert.equal(restored.seen.has('tt0133093|Matrix - CZ'), true);
+  assert.equal(restored.metas.length, 2);
+});
+
+test('persistent cache records can distinguish fresh from stale without network access', () => {
+  assert.equal(addon.persistentFresh({ expiresAt:Date.now() + 60_000, value:{ok:true} }), true);
+  assert.equal(addon.persistentFresh({ expiresAt:Date.now() - 1, value:{ok:true} }), false);
+  assert.ok(addon.PERSISTENT_RETENTION_MS >= 24 * 60 * 60 * 1000);
 });
