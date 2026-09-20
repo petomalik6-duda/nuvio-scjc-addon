@@ -28,6 +28,25 @@ if (realFetch && CDER_MANIFEST_URL) {
         idPrefixes: Array.isArray(manifest?.idPrefixes) ? manifest.idPrefixes : []
       };
       console.log('[CDER_PROBE]', JSON.stringify(safe));
+      if (response.ok && manifest) {
+        const base = CDER_MANIFEST_URL.replace(/\/manifest\.json(?:\?.*)?$/i, '');
+        for (const [type, id] of [['movie','sc-movie-filter'], ['series','sc-series-filter']]) {
+          try {
+            const cr = await realFetch(base + '/catalog/' + type + '/' + id + '.json', {
+              headers: { 'accept': 'application/json', 'user-agent': 'SCJC-cder-probe/1.0' }
+            });
+            const ct = await cr.text();
+            let cj = null;
+            try { cj = ct ? JSON.parse(ct) : null; } catch {}
+            const metas = Array.isArray(cj?.metas) ? cj.metas : [];
+            const genres = [...new Set(metas.flatMap((m) => Array.isArray(m?.genres) ? m.genres : []).filter(Boolean))].slice(0, 100);
+            const samples = metas.slice(0, 3).map((m) => ({ id: m?.id || null, name: m?.name || null, genres: Array.isArray(m?.genres) ? m.genres : [] }));
+            console.log('[CDER_FILTER_PROBE]', JSON.stringify({ type, status: cr.status, count: metas.length, genres, samples }));
+          } catch (err) {
+            console.warn('[CDER_FILTER_PROBE] failed', JSON.stringify({ type, message: err?.message || String(err) }));
+          }
+        }
+      }
     } catch (err) {
       console.warn('[CDER_PROBE] failed', JSON.stringify({ message: err?.message || String(err) }));
     }
