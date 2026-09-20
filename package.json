@@ -1,6 +1,6 @@
 {
   "name": "nuvio-scjc-addon",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "private": true,
   "description": "Safe Nuvio/Stremio bridge over a configured cder Stream Cinema addon. No direct KRA or Stream Cinema authentication.",
   "main": "server.js",
