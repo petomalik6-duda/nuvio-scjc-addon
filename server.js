@@ -868,6 +868,25 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    setTimeout(async () => {
+      const checks = [
+        ['movie','scx-search-movies','Matrix'],
+        ['series','scx-search-series','Fallout'],
+        ['movie','scx-search-concerts','Sting']
+      ];
+      for (const [type,id,q] of checks) {
+        try {
+          const extra = new URLSearchParams({ search:q });
+          const body = await customCatalog(customMap.get(id), extra);
+          console.log('[SEARCH_SELFTEST]', JSON.stringify({
+            type,id,q,count:Array.isArray(body?.metas)?body.metas.length:0,
+            top:Array.isArray(body?.metas)?body.metas.slice(0,3).map(m=>({id:m?.id||null,name:m?.name||null})):[]
+          }));
+        } catch (err) {
+          console.warn('[SEARCH_SELFTEST] failed', JSON.stringify({type,id,q,message:err?.message||String(err)}));
+        }
+      }
+    }, 1200).unref?.();
   });
 }
 
