@@ -1,4 +1,4 @@
-# SCJC + cder bridge v2.5.0
+# SCJC + cder bridge v2.6.0
 
 Nuvio/Stremio-compatible bridge over a configured cder Stream Cinema addon.
 
@@ -11,6 +11,7 @@ Nuvio/Stremio-compatible bridge over a configured cder Stream Cinema addon.
 - Sorts Stream Cinema streams by CZ/SK dubbing first, then file size, then quality.
 - Adds stream labels for language, resolution, HDR/Dolby Vision, Atmos/DTS:X, codec and file size.
 - Uses bounded TTL caching, request coalescing, concurrency limits and 429 backoff.
+- Uses 100-item pages and supports up to 800 items per catalog when the upstream source contains enough matching items.
 
 ## Install
 
