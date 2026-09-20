@@ -922,12 +922,19 @@ if (require.main === module) {
     setTimeout(async () => {
       try {
         const body = await upstreamJson('/catalog/movie/sc-movie-latest.json');
+        const skipBody = await upstreamJson('/catalog/movie/sc-movie-latest/skip=0.json');
         const raw = Array.isArray(body?.metas) ? body.metas : [];
         const normalized = standardizeCatalogBody('movie', body);
+        const dubbed = await customCatalog(
+          customMap.get('scx-movie-dubbed-latest'),
+          new URLSearchParams({ skip:'0' })
+        );
         console.log('[V25_CATALOG_PROBE]', JSON.stringify({
           configured:!!CDER_MANIFEST_URL,
           rawCount:raw.length,
+          skip0Count:Array.isArray(skipBody?.metas)?skipBody.metas.length:0,
           normalizedCount:Array.isArray(normalized?.metas)?normalized.metas.length:0,
+          dubbedCount:Array.isArray(dubbed?.metas)?dubbed.metas.length:0,
           firstRawId:raw[0]?.id || null,
           firstNormalizedId:normalized?.metas?.[0]?.id || null,
           lastError:metrics.lastError
