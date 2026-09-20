@@ -3,7 +3,7 @@
 const http = require('node:http');
 const { URL } = require('node:url');
 
-const VERSION = '2.0.0';
+const VERSION = '2.0.1';
 const PORT = Number(process.env.PORT || 10000);
 const CDER_MANIFEST_URL = String(process.env.CDER_MANIFEST_URL || '').trim();
 const PAGE_SIZE = 50;
@@ -31,7 +31,9 @@ const CUSTOM_CATALOGS = [
   { id:'scx-movie-cz', type:'movie', name:'🇨🇿 SC+: Filmy s CZ', source:'sc-movie-filter', languages:['CZ'] },
   { id:'scx-movie-sk', type:'movie', name:'🇸🇰 SC+: Filmy so SK', source:'sc-movie-filter', languages:['SK'] },
   { id:'scx-series-cz', type:'series', name:'🇨🇿 SC+: Seriály s CZ', source:'sc-series-filter', languages:['CZ'] },
-  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'] }
+  { id:'scx-series-sk', type:'series', name:'🇸🇰 SC+: Seriály so SK', source:'sc-series-filter', languages:['SK'] },
+  { id:'scx-concerts', type:'movie', name:'🎤 SC+: Koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true },
+  { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music' }
 ];
 
 const verifiedMap = new Map(VERIFIED_CATALOGS.map((c) => [c.id, c]));
@@ -139,6 +141,11 @@ function matchesLanguages(meta, languages) {
   return languages.some((lang) => flags[lang]);
 }
 
+function isConcertLike(meta) {
+  const name = fold(meta && meta.name).replace(/\s+-\s+[A-Z,+ ]+$/, '');
+  return /\bLIVE\b|\bCONCERT\b|\bKONCERT\b|\bTOUR\b|\bUNPLUGGED\b|\bONE NIGHT ONLY\b|\bHOMECOMING\b|\bWEMBLEY\b|\bOLYMPIA\b|\bLIVE SESSION\b|\bLIVE PERFORMANCE\b|\bLIVE EXPERIENCE\b|\bMUSIC FESTIVAL\b/.test(name);
+}
+
 function retryAfterMs(headers) {
   const raw = headers && headers.get ? headers.get('retry-after') : null;
   if (!raw) return DEFAULT_BACKOFF_MS;
@@ -233,9 +240,12 @@ async function upstreamJson(path, options) {
   }
 }
 
-function upstreamCatalogPath(type, id, skip) {
-  if (!skip) return '/catalog/' + type + '/' + id + '.json';
-  return '/catalog/' + type + '/' + id + '/skip=' + Number(skip) + '.json';
+function upstreamCatalogPath(type, id, skip, genre) {
+  const extras = [];
+  if (genre) extras.push('genre=' + encodeURIComponent(genre));
+  if (skip) extras.push('skip=' + Number(skip));
+  if (!extras.length) return '/catalog/' + type + '/' + id + '.json';
+  return '/catalog/' + type + '/' + id + '/' + extras.join('&') + '.json';
 }
 
 async function customCatalog(custom, extra) {
@@ -247,7 +257,7 @@ async function customCatalog(custom, extra) {
     const upstreamSkip = page * UPSTREAM_SCAN_SIZE;
     let body;
     try {
-      body = await upstreamJson(upstreamCatalogPath(custom.type, custom.source, upstreamSkip));
+      body = await upstreamJson(upstreamCatalogPath(custom.type, custom.source, upstreamSkip, custom.genre));
     } catch {
       break;
     }
@@ -255,7 +265,9 @@ async function customCatalog(custom, extra) {
     if (!metas.length) break;
 
     for (const meta of metas) {
-      if (matchesLanguages(meta, custom.languages)) matched.push(meta);
+      if (Array.isArray(custom.languages) && !matchesLanguages(meta, custom.languages)) continue;
+      if (custom.concertOnly && !isConcertLike(meta)) continue;
+      matched.push(meta);
     }
 
     if (metas.length < UPSTREAM_SCAN_SIZE) break;
@@ -365,34 +377,6 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
-    setTimeout(async () => {
-      for (const hiddenId of ['sc-concert-latest','sc-concerts-latest','sc-koncert-latest','sc-koncerts-latest','sc-movie-concert']) {
-        try {
-          const body = await upstreamJson('/catalog/movie/' + hiddenId + '.json');
-          const metas = Array.isArray(body && body.metas) ? body.metas : [];
-          console.log('[CONCERT_ROUTE_PROBE]', JSON.stringify({
-            id:hiddenId,
-            count:metas.length,
-            samples:metas.slice(0,5).map((m) => ({ id:m && m.id || null, name:m && m.name || null }))
-          }));
-        } catch (err) {
-          console.warn('[CONCERT_ROUTE_PROBE]', JSON.stringify({ id:hiddenId, error:err && err.message ? err.message : String(err) }));
-        }
-      }
-      for (const genre of ['Music','Hudba','Concert','Koncert']) {
-        try {
-          const body = await upstreamJson('/catalog/movie/sc-movie-filter/genre=' + encodeURIComponent(genre) + '.json');
-          const metas = Array.isArray(body && body.metas) ? body.metas : [];
-          console.log('[CONCERT_PROBE]', JSON.stringify({
-            genre,
-            count:metas.length,
-            samples:metas.slice(0,8).map((m) => ({ id:m && m.id || null, name:m && m.name || null }))
-          }));
-        } catch (err) {
-          console.warn('[CONCERT_PROBE]', JSON.stringify({ genre, error:err && err.message ? err.message : String(err) }));
-        }
-      }
-    }, 1200).unref?.();
   });
 }
 
@@ -402,5 +386,6 @@ module.exports = {
   fold,
   languageFlags,
   matchesLanguages,
+  isConcertLike,
   upstreamCatalogPath
 };
