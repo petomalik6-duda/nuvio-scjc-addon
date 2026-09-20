@@ -1,13 +1,14 @@
 {
   "name": "nuvio-scjc-addon",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
-  "description": "Safe Nuvio/Stremio bridge over a configured cder Stream Cinema addon. No direct KRA or Stream Cinema authentication.",
+  "description": "Lean Nuvio/Stremio cder bridge with standard IMDb IDs, search, bounded cache and CZ/SK-first stream sorting.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "postinstall": "npm test"
   },
   "engines": {
     "node": ">=20"
