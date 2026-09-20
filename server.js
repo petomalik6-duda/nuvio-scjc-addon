@@ -990,6 +990,25 @@ if (require.main === module) {
         ['series','MOST'],
         ['series','Dunaj']
       ];
+      const countryChecks = [
+        ['movie','sc-movie-filter','country=Česko'],
+        ['movie','sc-movie-filter','country=Slovensko'],
+        ['series','sc-series-filter','country=Česko'],
+        ['series','sc-series-filter','country=Slovensko']
+      ];
+      for (const [type,source,extra] of countryChecks) {
+        try {
+          const body = await upstreamJson('/catalog/' + type + '/' + source + '/' + encodeURI(extra) + '.json');
+          const metas = Array.isArray(body?.metas) ? body.metas.slice(0,5) : [];
+          console.log('[COUNTRY_FILTER_PROBE]', JSON.stringify({
+            type,extra,count:Array.isArray(body?.metas)?body.metas.length:0,
+            top:metas.map(m=>({id:m?.id||null,name:m?.name||null}))
+          }));
+        } catch (err) {
+          console.warn('[COUNTRY_FILTER_PROBE]', JSON.stringify({type,extra,error:err?.message||String(err)}));
+        }
+      }
+
       const nativeIds = [
         ['movie','sc1957','Pelíšky'],
         ['movie','sc56554','Invalida'],
