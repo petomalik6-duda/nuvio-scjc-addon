@@ -41,7 +41,7 @@ const CUSTOM_CATALOGS = [
   { id:'scx-music', type:'movie', name:'🎵 SC+: Hudba a koncerty', source:'sc-movie-filter', genre:'Music' },
   { id:'scx-search-movies', type:'movie', name:'🔎 SC+: Hľadať filmy', source:'sc-movie-popular', searchMode:'upstream' },
   { id:'scx-search-series', type:'series', name:'🔎 SC+: Hľadať seriály', source:'sc-series-popular', searchMode:'upstream' },
-  { id:'scx-search-concerts', type:'movie', name:'🔎🎤 SC+: Hľadať koncerty', source:'sc-movie-filter', genre:'Music', concertOnly:true, searchMode:'local' }
+  { id:'scx-search-concerts', type:'movie', name:'🔎🎤 SC+: Hľadať koncerty', source:'sc-movie-popular', concertOnly:true, searchMode:'upstream' }
 ];
 
 const verifiedMap = new Map(VERIFIED_CATALOGS.map((c) => [c.id, c]));
