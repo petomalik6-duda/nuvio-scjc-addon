@@ -990,6 +990,25 @@ if (require.main === module) {
         ['series','MOST'],
         ['series','Dunaj']
       ];
+      const nativeIds = [
+        ['movie','sc1957','Pelíšky'],
+        ['movie','sc56554','Invalida'],
+        ['series','sc28158','MOST!']
+      ];
+      for (const [type,id,label] of nativeIds) {
+        try {
+          const body = await upstreamJson('/meta/' + type + '/' + id + '.json');
+          const meta = body?.meta || {};
+          const picked = {};
+          for (const key of ['id','name','originalName','originalTitle','language','languages','originalLanguage','original_language','country','countries','countryOfOrigin','productionCountries','genres','year','releaseInfo','links','behaviorHints']) {
+            if (meta[key] != null) picked[key] = meta[key];
+          }
+          console.log('[NATIVE_META_PROBE]', JSON.stringify({type,id,label,keys:Object.keys(meta),picked}));
+        } catch (err) {
+          console.warn('[NATIVE_META_PROBE]', JSON.stringify({type,id,label,error:err?.message||String(err)}));
+        }
+      }
+
       for (const [type,q] of checks) {
         try {
           const source = type === 'movie' ? 'sc-movie-popular' : 'sc-series-popular';
