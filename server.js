@@ -990,6 +990,26 @@ if (require.main === module) {
         ['series','MOST'],
         ['series','Dunaj']
       ];
+      const nativeFilterChecks = [
+        ['movie','sc-movie-filter','year=1999&letter=P','sc1957','Pelíšky'],
+        ['movie','sc-movie-filter','year=2023&letter=I','sc56554','Invalida'],
+        ['series','sc-series-filter','year=2019&letter=M','sc28158','MOST!']
+      ];
+      for (const [type,source,extra,targetId,label] of nativeFilterChecks) {
+        try {
+          const body = await upstreamJson('/catalog/' + type + '/' + source + '/' + extra + '.json');
+          const metas = Array.isArray(body?.metas) ? body.metas : [];
+          const target = metas.find(m => String(m?.id) === targetId) || null;
+          console.log('[NATIVE_FILTER_PROBE]', JSON.stringify({
+            type,label,targetId,count:metas.length,
+            target:target ? {id:target.id,name:target.name,flags:languageFlags(target)} : null,
+            sample:metas.slice(0,8).map(m=>({id:m?.id||null,name:m?.name||null}))
+          }));
+        } catch (err) {
+          console.warn('[NATIVE_FILTER_PROBE]', JSON.stringify({type,label,targetId,error:err?.message||String(err)}));
+        }
+      }
+
       for (const [type,source] of [['movie','sc-movie-filter'],['series','sc-series-filter']]) {
         try {
           const body = await upstreamJson('/catalog/' + type + '/' + source + '.json');
