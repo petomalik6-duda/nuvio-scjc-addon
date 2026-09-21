@@ -285,6 +285,38 @@ function reviveDerivedState(value) {
   };
 }
 
+async function oneShotConfiguredCderDiagnostic() {
+  if (!CDER_MANIFEST_URL) {
+    console.log('[CDER_ONE_SHOT_DIAG]', JSON.stringify({ configured:false }));
+    return;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const base = upstreamBase();
+    const url = new URL('catalog/movie/sc-movie-latest.json', base);
+    const response = await fetch(url, {
+      headers:{
+        accept:'application/json',
+        'user-agent':'SCJC-one-shot-diagnostic/' + VERSION
+      },
+      signal:controller.signal
+    });
+    console.log('[CDER_ONE_SHOT_DIAG]', JSON.stringify({
+      configured:true,
+      status:response.status,
+      ok:response.ok
+    }));
+  } catch (error) {
+    console.log('[CDER_ONE_SHOT_DIAG]', JSON.stringify({
+      configured:true,
+      error:error?.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR'
+    }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function upstreamBase() {
   if (!CDER_MANIFEST_URL) throw new Error('CDER_MANIFEST_URL is not configured');
   const url = new URL(CDER_MANIFEST_URL);
@@ -1196,6 +1228,7 @@ async function handle(req, res) {
 if (require.main === module) {
   http.createServer(handle).listen(PORT, '0.0.0.0', () => {
     console.log('SCJC + cder v' + VERSION + ' listening on :' + PORT);
+    oneShotConfiguredCderDiagnostic();
   });
 }
 
