@@ -1,4 +1,5 @@
 'use strict';
+const { withTimeout } = require('./lib/with-timeout');
 
 const http = require('node:http');
 const crypto = require('node:crypto');
@@ -174,15 +175,7 @@ function persistentKey(namespace, key) {
   return 'scjc:v2:' + namespace + ':' + digest;
 }
 
-function withTimeout(promise, ms = PERSISTENT_OP_TIMEOUT_MS) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      const timer = setTimeout(() => reject(new Error('PERSISTENT_CACHE_TIMEOUT')), ms);
-      timer.unref?.();
-    })
-  ]);
-}
+
 
 async function getRedisClient() {
   if (!REDIS_URL) return null;
