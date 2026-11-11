@@ -1,5 +1,5 @@
-const { withTimeout } = require('./lib/with-timeout');
 'use strict';
+const { withTimeout } = require('./lib/with-timeout');
 
 const http = require('node:http');
 const crypto = require('node:crypto');
